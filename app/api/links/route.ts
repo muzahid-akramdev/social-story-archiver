@@ -1,8 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createClient } from '@supabase/supabase-js';
 import { v4 as uuidv4 } from 'uuid';
+import { extractStoryMedia } from '@/lib/extract';
 
-// TODO: Replace with your Supabase credentials from env
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!;
 const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY!;
 
@@ -10,9 +10,9 @@ const supabase = createClient(supabaseUrl, supabaseServiceKey);
 
 async function detectPlatform(url: string): Promise<'facebook' | 'instagram'> {
   const lower = url.toLowerCase();
-  if (lower.includes('facebook.com') || lower.includes('fb.watch')) return 'facebook';
+  if (lower.includes('facebook.com') || lower.includes('fb.watch') || lower.includes('stories')) return 'facebook';
   if (lower.includes('instagram.com')) return 'instagram';
-  throw new Error('Unsupported platform. Only Facebook and Instagram story links are supported.');
+  throw new Error('Unsupported platform.');
 }
 
 export async function POST(request: NextRequest) {
@@ -25,45 +25,44 @@ export async function POST(request: NextRequest) {
 
     const platform = await detectPlatform(url);
 
-    // Check if already exists
+    // Extract media
+    const mediaItems = await extractStoryMedia(url, platform);
+
+    // Save to DB
     const { data: existing } = await supabase
       .from('watched_links')
-      .select('id, label')
+      .select('id')
       .eq('source_url', url)
       .single();
 
+    let linkId;
     if (existing) {
-      // Trigger immediate recheck (TODO: call extraction)
-      return NextResponse.json({ 
-        id: existing.id, 
-        message: 'Link already tracked. Recheck triggered.' 
-      });
+      linkId = existing.id;
+    } else {
+      const { data, error } = await supabase
+        .from('watched_links')
+        .insert({
+          source_url: url,
+          platform,
+          label: url.split('/').pop() || 'Untitled',
+        })
+        .select()
+        .single();
+
+      if (error) throw error;
+      linkId = data.id;
     }
 
-    // Create new watched link
-    const { data, error } = await supabase
-      .from('watched_links')
-      .insert({
-        source_url: url,
-        platform,
-        label: url.split('/').slice(-1)[0] || 'Untitled',
-      })
-      .select()
-      .single();
-
-    if (error) throw error;
-
-    // TODO: Trigger initial extraction here
-
     return NextResponse.json({
-      id: data.id,
-      source_url: data.source_url,
-      platform: data.platform,
-      label: data.label,
+      id: linkId,
+      source_url: url,
+      platform,
+      mediaCount: mediaItems.length,
+      message: `Started archiving with ${mediaItems.length} media item(s)`,
     });
 
   } catch (error: any) {
-    console.error('Error in /api/links:', error);
+    console.error('Error:', error);
     return NextResponse.json({ 
       error: error.message || 'Internal server error' 
     }, { status: 500 });
