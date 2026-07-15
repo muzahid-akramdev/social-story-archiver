@@ -26,8 +26,7 @@ export async function POST(request: NextRequest) {
     const platform = await detectPlatform(url);
 
     // Extract media
-    const mediaItems = await extractStoryMedia(url, platform);
-
+const mediaItems = await extractStoryMedia(url);
     // Save to DB
     const { data: existing } = await supabase
       .from('watched_links')
