@@ -1,0 +1,29 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Signature element: every archived item renders like a small instant-film
+   frame — thicker cream border at the bottom, a slight resting rotation
+   that straightens on hover. Used by StoryGrid. */
+.film-frame {
+  background: theme(colors.paper.DEFAULT);
+  padding: 10px 10px 34px 10px;
+  box-shadow: 0 6px 16px rgb(0 0 0 / 0.35);
+  transition: transform 180ms ease, box-shadow 180ms ease;
+}
+.film-frame:hover {
+  transform: rotate(0deg) scale(1.02) !important;
+  box-shadow: 0 10px 24px rgb(0 0 0 / 0.45);
+}
+
+/* Focus visibility, kept even though the palette is dark */
+:focus-visible {
+  outline: 2px solid theme(colors.amber.DEFAULT);
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    transition-duration: 0.01ms !important;
+  }
+}
