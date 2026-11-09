@@ -811,64 +811,66 @@ async function discoverStoryBucketId(
   error: string | null;
   sessionInvalid: boolean;
 }> {
-  const profileUrl = /^\d+$/.test(ownerId)
-    ? `https://www.facebook.com/profile.php?id=${encodeURIComponent(ownerId)}`
-    : `https://www.facebook.com/${encodeURIComponent(ownerId)}`;
-  let html: string;
-  let finalUrl: string;
-  try {
-    const res = await fetch(profileUrl, {
-      headers: {
-        "User-Agent": USER_AGENT,
-        "Accept-Language": "en-US,en;q=0.9",
-        Cookie: cookie,
-      },
-      redirect: "follow",
-      signal: AbortSignal.timeout(GRAPHQL_TIMEOUT_MS),
-    });
-    finalUrl = res.url;
-    html = await res.text();
-    if (!res.ok) {
+  // Host/UA variants: www + desktop UA answers HTTP 400 for profile
+  // pages from datacenter IPs (verified live 2026-11-10 — the same
+  // pattern the anonymous story.php route showed), while web/m hosts
+  // serve the page. Try each until one yields an authenticated page.
+  const path = /^\d+$/.test(ownerId)
+    ? `profile.php?id=${encodeURIComponent(ownerId)}`
+    : encodeURIComponent(ownerId);
+  const variants: Array<{ url: string; ua: string }> = [
+    { url: `https://www.facebook.com/${path}`, ua: USER_AGENT },
+    { url: `https://web.facebook.com/${path}`, ua: USER_AGENT },
+    { url: `https://m.facebook.com/${path}`, ua: IPHONE_USER_AGENT },
+    { url: `https://www.facebook.com/${path}`, ua: IPHONE_USER_AGENT },
+  ];
+  let lastError = "no variant answered";
+  for (const variant of variants) {
+    let html: string;
+    let finalUrl: string;
+    try {
+      const res = await fetch(variant.url, {
+        headers: {
+          "User-Agent": variant.ua,
+          "Accept-Language": "en-US,en;q=0.9",
+          Cookie: cookie,
+        },
+        redirect: "follow",
+        signal: AbortSignal.timeout(GRAPHQL_TIMEOUT_MS),
+      });
+      finalUrl = res.url;
+      html = await res.text();
+      if (!res.ok) {
+        lastError = `profile page answered HTTP ${res.status} (${new URL(variant.url).hostname})`;
+        continue;
+      }
+    } catch (err) {
+      lastError = `profile page request failed: ${redactCookie(cookie, (err as Error).message)}`;
+      continue;
+    }
+    if (classifySessionResponse(finalUrl, html) === "invalid") {
       return {
         bucketId: null,
-        error: `profile page answered HTTP ${res.status}`,
-        sessionInvalid: false,
+        error:
+          "dedicated session invalid/expired or checkpointed — the " +
+          "profile page answered with a login/checkpoint page",
+        sessionInvalid: true,
       };
     }
-  } catch (err) {
-    return {
-      bucketId: null,
-      error: `profile page request failed: ${redactCookie(cookie, (err as Error).message)}`,
-      sessionInvalid: false,
-    };
+    const norm = normalizeSsrJson(html);
+    const bucketId =
+      norm.match(
+        /"story_bucket"\s*:\s*\{\s*"nodes"\s*:\s*\[\s*\{\s*"id"\s*:\s*"(\d{6,})"/
+      )?.[1] ??
+      norm.match(/"story_bucket_id"\s*:\s*"(\d{6,})"/)?.[1] ??
+      null;
+    if (bucketId) return { bucketId, error: null, sessionInvalid: false };
+    lastError =
+      "profile page carried no story_bucket node — the person has " +
+      "no active story right now, the story ring is not visible to " +
+      "the dedicated account, or the layout changed";
   }
-  if (classifySessionResponse(finalUrl, html) === "invalid") {
-    return {
-      bucketId: null,
-      error:
-        "dedicated session invalid/expired or checkpointed — the " +
-        "profile page answered with a login/checkpoint page",
-      sessionInvalid: true,
-    };
-  }
-  const norm = normalizeSsrJson(html);
-  const bucketId =
-    norm.match(
-      /"story_bucket"\s*:\s*\{\s*"nodes"\s*:\s*\[\s*\{\s*"id"\s*:\s*"(\d{6,})"/
-    )?.[1] ??
-    norm.match(/"story_bucket_id"\s*:\s*"(\d{6,})"/)?.[1] ??
-    null;
-  if (!bucketId) {
-    return {
-      bucketId: null,
-      error:
-        "profile page carried no story_bucket node — the person has " +
-        "no active story right now, the story ring is not visible to " +
-        "the dedicated account, or the layout changed",
-      sessionInvalid: false,
-    };
-  }
-  return { bucketId, error: null, sessionInvalid: false };
+  return { bucketId: null, error: lastError, sessionInvalid: false };
 }
 
 /**
