@@ -247,6 +247,7 @@ export async function fetchAndParseFacebookMedia(
       const viaGql = await fetchViaSessionGraphql({
         bucketId: gqlBucketId,
         cookie: sessionCookie,
+        storyId,
         bootstrapHintUrls: [
           ...(storyId ? [buildStoriesPageUrl(gqlBucketId, storyId)] : []),
           ...(ownerId
@@ -946,6 +947,8 @@ async function fetchViaSessionGraphql(args: {
   bucketId: string;
   cookie: string;
   bootstrapHintUrls?: string[];
+  /** When known, enables the raw-text fallback scan + shape census. */
+  storyId?: string | null;
 }): Promise<
   | { ok: true; items: MediaItem[] }
   | { ok: false; error: string; sessionInvalid: boolean }
@@ -1039,6 +1042,14 @@ async function fetchViaSessionGraphql(args: {
   const items = parseGraphqlBucketMedia(text);
   if (items.length > 0) return { ok: true, items };
 
+  // Fallback: the live response's exact nesting may differ from the
+  // documented shapes; scan the raw text around the story/bucket ids
+  // with the same window parser the SSR legs use.
+  if (args.storyId) {
+    const scanned = parseStoryBucketMedia(text, args.storyId, bucketId);
+    if (scanned.length > 0) return { ok: true, items: scanned };
+  }
+
   const gqlError = firstGraphqlError(text);
   if (gqlError) {
     const rotated = /not found|PersistedQuery|document/i.test(gqlError)
@@ -1052,12 +1063,28 @@ async function fetchViaSessionGraphql(args: {
     };
   }
 
+  // Shape census (counts and key presence only — never URLs or media
+  // content): makes the next diagnosis decisive instead of speculative.
+  const census = [
+    `bytes=${text.length}`,
+    `bucketIdInResponse=${text.includes(bucketId)}`,
+    args.storyId ? `storyIdInResponse=${text.includes(args.storyId)}` : null,
+    `hasUnifiedStories=${text.includes("unified_stories")}`,
+    `fullSizePhotoMarkers=${(text.match(/t39\.30808-6/g) ?? []).length}`,
+    `playableUrlMarkers=${(text.match(/playable_url/g) ?? []).length}`,
+    `nodesNull=${/"nodes"\s*:\s*\[\s*null/.test(text)}`,
+    `hasData=${/"data"\s*:/.test(text)}`,
+  ]
+    .filter(Boolean)
+    .join(", ");
+
   return {
     ok: false,
     error:
       `GraphQL bucket query returned no media for bucket ${bucketId} ` +
-      "(bucket empty/expired, or its audience is not visible to the " +
-      "dedicated account)",
+      `(shape census: ${census}) — bucket empty/expired, its audience ` +
+      "is not visible to the dedicated account, or the response shape " +
+      "differs from the documented one",
     sessionInvalid: false,
   };
 }
