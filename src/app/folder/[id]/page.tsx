@@ -2,8 +2,14 @@ import { notFound, redirect } from "next/navigation";
 import Link from "next/link";
 import { supabaseServer } from "@/lib/supabase/server";
 import { getAuthUser } from "@/lib/auth";
-import { Story, WatchedLink } from "@/lib/types";
+import { Archive, Story, WatchedLink } from "@/lib/types";
 import StoryGrid, { GalleryItem } from "@/components/StoryGrid";
+
+function formatBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / (1024 * 1024)).toFixed(2)} MB`;
+}
 
 export const dynamic = "force-dynamic";
 
@@ -33,6 +39,23 @@ export default async function FolderPage({ params }: { params: { id: string } })
     .order("archived_at", { ascending: false });
 
   const stories = (storyRows ?? []) as Story[];
+
+  // v2: this folder's ZIP archives (one per crawl that found new
+  // stories), newest first, each with a signed download URL.
+  const { data: archiveRows } = await db
+    .from("archives")
+    .select("*")
+    .eq("watched_link_id", params.id)
+    .order("created_at", { ascending: false });
+
+  const archiveItems = await Promise.all(
+    ((archiveRows ?? []) as Archive[]).map(async (a) => {
+      const { data: signed } = await db.storage
+        .from(BUCKET)
+        .createSignedUrl(a.zip_path, SIGNED_URL_TTL_SECONDS);
+      return { ...a, downloadUrl: signed?.signedUrl ?? "" };
+    })
+  );
 
   const items: GalleryItem[] = await Promise.all(
     stories.map(async (story) => {
@@ -65,6 +88,38 @@ export default async function FolderPage({ params }: { params: { id: string } })
           {items.length} {items.length === 1 ? "story" : "stories"} kept
         </p>
       </header>
+
+      {archiveItems.length > 0 && (
+        <section className="mb-14">
+          <h2 className="font-mono text-xs uppercase tracking-widest text-paper/50 mb-4">
+            ZIP archives — one per crawl with new stories
+          </h2>
+          <ul className="space-y-2">
+            {archiveItems.map((a) => (
+              <li
+                key={a.id}
+                className="flex flex-wrap items-center gap-x-4 gap-y-1 border border-paper/15 rounded px-4 py-3 text-sm"
+              >
+                <span className="text-paper/80">
+                  {new Date(a.created_at).toLocaleString()}
+                </span>
+                <span className="font-mono text-xs text-paper/50">
+                  {a.story_count} {a.story_count === 1 ? "story" : "stories"} ·{" "}
+                  {formatBytes(a.zip_size_bytes)}
+                </span>
+                {a.downloadUrl && (
+                  <a
+                    href={a.downloadUrl}
+                    className="ml-auto text-amber underline underline-offset-2"
+                  >
+                    Download ZIP
+                  </a>
+                )}
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
 
       <StoryGrid items={items.filter((i) => i.url)} />
     </main>

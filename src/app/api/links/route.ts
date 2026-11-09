@@ -3,8 +3,11 @@ import { supabaseServer } from "@/lib/supabase/server";
 import { detectPlatform } from "@/lib/extraction";
 import { recheckOneLink } from "@/lib/recheck";
 import { getAuthUser } from "@/lib/auth";
-import { facebookSessionStatus } from "@/lib/facebook-session";
-import { WatchedLink } from "@/lib/types";
+import {
+  resolveFolderIdentity,
+  withMockIdentity,
+} from "@/lib/resolve-link";
+import { FolderType, WatchedLink } from "@/lib/types";
 
 export async function GET() {
   const user = await getAuthUser();
@@ -41,32 +44,19 @@ export async function POST(req: NextRequest) {
   const user = await getAuthUser();
   if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
-  // Story fetching always needs this user's own Facebook session (no API
-  // path works — see facebook.ts), so check upfront rather than letting
-  // it fail confusingly during the recheck below.
-  const fbStatus = await facebookSessionStatus(user.id);
-  if (!fbStatus.connected) {
-    return NextResponse.json(
-      {
-        error:
-          "Connect your Facebook account first at /connect-facebook — " +
-          "story archiving needs your own logged-in session.",
-      },
-      { status: 400 }
-    );
-  }
+  // v2: NO Facebook session of any kind is a prerequisite for creating a
+  // folder. Extraction is session-free first (see extraction/facebook.ts);
+  // a connected session, when a user has one, is only a fallback inside
+  // recheck. Folder creation must never be gated on it.
 
   const body = await req.json().catch(() => null);
 
   if (!body || typeof body.source_url !== "string" || !body.source_url.trim()) {
     return NextResponse.json({ error: "source_url is required" }, { status: 400 });
   }
-  if (typeof body.friend_name !== "string" || !body.friend_name.trim()) {
-    return NextResponse.json(
-      { error: "friend_name is required — whose stories these are" },
-      { status: 400 }
-    );
-  }
+  // friend_name is optional in v2: when omitted, the folder's label is
+  // resolved from the link itself (src/lib/resolve-link.ts). When given,
+  // it wins — a human knows the person's name better than a URL does.
   if (body.consent_confirmed !== true) {
     return NextResponse.json(
       {
@@ -94,17 +84,41 @@ export async function POST(req: NextRequest) {
 
   const db = supabaseServer();
 
+  // Folder type (migration 0006): chosen with two buttons in the form.
+  // Anything that isn't explicitly "page" is a personal profile — the
+  // DB default agrees.
+  const folderType: FolderType =
+    body.folder_type === "page" ? "page" : "personal_profile";
+
+  // Resolve identity from the link: profile links AND story links both
+  // work. Story link → fb_bucket_id (+ the story id it points at);
+  // profile.php?id= → fb_profile_id; vanity link → username as label.
+  const sourceUrl = body.source_url.trim();
+  const resolved = withMockIdentity(resolveFolderIdentity(sourceUrl), sourceUrl);
+
+  const friendName =
+    typeof body.friend_name === "string" && body.friend_name.trim()
+      ? body.friend_name.trim()
+      : (resolved.labelGuess ?? "Facebook user");
+
   const { data: link, error: upsertError } = await db
     .from("watched_links")
     .upsert(
       {
         user_id: user.id,
-        source_url: body.source_url.trim(),
+        source_url: sourceUrl,
         platform,
-        friend_name: body.friend_name.trim(),
+        friend_name: friendName,
         consent_confirmed: true,
         consent_note: typeof body.consent_note === "string" ? body.consent_note : null,
-        label: typeof body.label === "string" ? body.label : null,
+        label:
+          typeof body.label === "string" && body.label.trim()
+            ? body.label.trim()
+            : friendName,
+        fb_bucket_id: resolved.fbBucketId,
+        fb_profile_id: resolved.fbProfileId,
+        avatar_url: resolved.avatarUrl,
+        folder_type: folderType,
       },
       { onConflict: "user_id,source_url", ignoreDuplicates: false }
     )

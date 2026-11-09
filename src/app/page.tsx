@@ -40,6 +40,7 @@ export default async function HomePage() {
     <main className="max-w-5xl mx-auto px-6 py-16">
       <nav className="flex flex-wrap items-center gap-4 mb-8 font-mono text-xs uppercase tracking-widest">
         <Link href="/connect-facebook" className="text-amber">Connect Facebook</Link>
+        <Link href="/admin" className="text-paper/60 hover:text-paper">System status</Link>
         <Link href="/download/video" className="text-paper/60 hover:text-paper">Download video</Link>
         <Link href="/download/group" className="text-paper/60 hover:text-paper">Download group video</Link>
         <span className="ml-auto"><SignOutButton /></span>

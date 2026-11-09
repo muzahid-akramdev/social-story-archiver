@@ -16,6 +16,17 @@ function timeAgo(iso: string | null): string {
   return `${Math.floor(hr / 24)}d ago`;
 }
 
+/** v2 crawl cadence is 8h (migration 0005) — next sweep ≈ last check + 8h. */
+function nextCrawlIn(iso: string | null): string {
+  if (!iso) return "due now";
+  const next = new Date(iso).getTime() + 8 * 3600000;
+  const ms = next - Date.now();
+  if (ms <= 0) return "due now";
+  const hr = Math.floor(ms / 3600000);
+  const min = Math.floor((ms % 3600000) / 60000);
+  return hr > 0 ? `~${hr}h ${min}m` : `~${min}m`;
+}
+
 export default function LinkCard({
   link,
 }: {
@@ -39,13 +50,27 @@ export default function LinkCard({
   return (
     <div className="film-frame rotate-1 hover:rotate-0 pb-3">
       <div className="flex items-start justify-between gap-2">
-        <div>
-          <p className="font-mono text-[10px] uppercase tracking-widest text-ink/50">
-            {link.platform}
-          </p>
-          <h3 className="font-display text-lg text-ink leading-tight">
-            {link.label || link.friend_name}
-          </h3>
+        <div className="flex items-center gap-3">
+          {link.avatar_url ? (
+            // eslint-disable-next-line @next/next/no-img-element
+            <img
+              src={link.avatar_url}
+              alt=""
+              className="w-10 h-10 rounded-full object-cover border border-ink/20"
+            />
+          ) : (
+            <span className="w-10 h-10 rounded-full bg-ink/10 border border-ink/20 flex items-center justify-center font-display italic text-ink/60">
+              {(link.label || link.friend_name).slice(0, 1)}
+            </span>
+          )}
+          <div>
+            <p className="font-mono text-[10px] uppercase tracking-widest text-ink/50">
+              {link.platform}
+            </p>
+            <h3 className="font-display text-lg text-ink leading-tight">
+              {link.label || link.friend_name}
+            </h3>
+          </div>
         </div>
         {stale && (
           <span
@@ -65,6 +90,14 @@ export default function LinkCard({
         <div className="flex justify-between">
           <dt>last checked</dt>
           <dd>{timeAgo(link.last_checked_at)}</dd>
+        </div>
+        <div className="flex justify-between">
+          <dt>last new story</dt>
+          <dd>{timeAgo(link.last_new_story_at)}</dd>
+        </div>
+        <div className="flex justify-between">
+          <dt>next crawl</dt>
+          <dd>{nextCrawlIn(link.last_checked_at)}</dd>
         </div>
       </dl>
 

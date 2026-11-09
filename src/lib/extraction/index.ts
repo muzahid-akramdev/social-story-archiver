@@ -1,19 +1,27 @@
-import { Platform, ExtractionResult } from "@/lib/types";
+import { Platform, ExtractionResult, StoryFetchContext } from "@/lib/types";
 import { fetchAndParseFacebookMedia } from "./facebook";
 
 /**
  * The one function the rest of the app calls. `cookie`, if given, is a
  * specific app-user's own saved Facebook session (see
  * src/lib/facebook-session.ts) — never a shared/global one.
+ * `storyContext`, when the caller knows it (the crawl path does — see
+ * src/lib/recheck.ts), enables the storyphp-og strategy: the folder's
+ * story id + owner uid/vanity. `sessionCookie`, when given, is the
+ * DEDICATED account's session from the FB_SESSION_COOKIE server env
+ * (see src/lib/dedicated-fb-session.ts) and enables the session-ssr
+ * strategy — query-only, never a view-logging call.
  */
 export async function extractStoryMedia(
   url: string,
   platform: Platform,
-  cookie?: string | null
+  cookie?: string | null,
+  storyContext?: StoryFetchContext,
+  sessionCookie?: string | null
 ): Promise<ExtractionResult> {
   switch (platform) {
     case "facebook":
-      return fetchAndParseFacebookMedia(url, cookie);
+      return fetchAndParseFacebookMedia(url, cookie, storyContext, sessionCookie);
     case "instagram":
       return {
         ok: false,
