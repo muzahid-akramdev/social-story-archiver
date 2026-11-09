@@ -4,6 +4,7 @@ import { supabaseServer } from "@/lib/supabase/server";
 import { getAuthUser } from "@/lib/auth";
 import { Archive, Story, WatchedLink } from "@/lib/types";
 import StoryGrid, { GalleryItem } from "@/components/StoryGrid";
+import DeleteFolderButton from "@/components/DeleteFolderButton";
 
 function formatBytes(n: number): string {
   if (n < 1024) return `${n} B`;
@@ -87,6 +88,9 @@ export default async function FolderPage({ params }: { params: { id: string } })
         <p className="mt-2 text-paper/60 text-sm">
           {items.length} {items.length === 1 ? "story" : "stories"} kept
         </p>
+        <div className="mt-4">
+          <DeleteFolderButton linkId={link.id} variant="dark" redirectHome />
+        </div>
       </header>
 
       {archiveItems.length > 0 && (

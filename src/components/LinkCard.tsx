@@ -4,6 +4,7 @@ import { useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { WatchedLink } from "@/lib/types";
+import DeleteFolderButton from "@/components/DeleteFolderButton";
 
 function timeAgo(iso: string | null): string {
   if (!iso) return "never";
@@ -128,6 +129,7 @@ export default function LinkCard({
         >
           {rechecking ? "Checking\u2026" : "Recheck now"}
         </button>
+        <DeleteFolderButton linkId={link.id} variant="paper" />
       </div>
     </div>
   );
