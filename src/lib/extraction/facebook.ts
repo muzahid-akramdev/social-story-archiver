@@ -247,6 +247,16 @@ export async function fetchAndParseFacebookMedia(
       const viaGql = await fetchViaSessionGraphql({
         bucketId: gqlBucketId,
         cookie: sessionCookie,
+        bootstrapHintUrls: [
+          ...(storyId ? [buildStoriesPageUrl(gqlBucketId, storyId)] : []),
+          ...(ownerId
+            ? [
+                /^\d+$/.test(ownerId)
+                  ? `https://www.facebook.com/profile.php?id=${encodeURIComponent(ownerId)}`
+                  : `https://www.facebook.com/${encodeURIComponent(ownerId)}`,
+              ]
+            : []),
+        ],
       });
       if (viaGql.ok) return viaGql;
       notes.push(`session-graphql failed: ${viaGql.error}`);
@@ -745,57 +755,86 @@ type SessionProbe =
   | { ok: true }
   | { ok: false; error: string; sessionInvalid: boolean };
 
+/** Mine an fb_dtsg token out of any authenticated page's payload. */
+function extractDtsgToken(html: string): string | null {
+  return (
+    html.match(/"DTSGInitialData",\[\],\{"token":"([^"]+)"/)?.[1] ??
+    html.match(/"DTSGInitialData"[\s\S]{0,300}?"token":"([^"]+)"/)?.[1] ??
+    html.match(/"dtsg"\s*:\s*\{\s*"token"\s*:\s*"([^"]+)"/)?.[1] ??
+    html.match(/"async_get_token":"([^"]+)"/)?.[1] ??
+    html.match(/name="fb_dtsg"\s+value="([^"]+)"/)?.[1] ??
+    html.match(/value="([^"]+)"\s+name="fb_dtsg"/)?.[1] ??
+    null
+  );
+}
+
 /**
- * Bootstrap fb_dtsg for the dedicated session: one GET of the homepage
- * with the session cookie, token mined from the SSR. Fetched fresh for
- * every crawl — the token is session-bound and rotates.
+ * Bootstrap fb_dtsg for the dedicated session. Fetched fresh for every
+ * crawl — the token is session-bound and rotates. The plain homepage
+ * is tried but is NOT trusted alone: from datacenter IPs it can be a
+ * stripped variant with no boot payload at all (verified live
+ * 2026-11-10 — authenticated, yet no DTSGInitialData). Full Comet app
+ * pages (the stories page) and the mobile site (hidden fb_dtsg form
+ * inputs) carry the token far more reliably, so all are tried.
  */
 async function fetchFbDtsg(
-  cookie: string
+  cookie: string,
+  hintUrls: string[] = []
 ): Promise<{ token: string } | { error: string; sessionInvalid: boolean }> {
-  let html: string;
-  let finalUrl: string;
-  try {
-    const res = await fetch("https://www.facebook.com/", {
-      headers: {
-        "User-Agent": USER_AGENT,
-        "Accept-Language": "en-US,en;q=0.9",
-        Cookie: cookie,
-      },
-      redirect: "follow",
-      signal: AbortSignal.timeout(GRAPHQL_TIMEOUT_MS),
-    });
-    finalUrl = res.url;
-    html = await res.text();
-  } catch (err) {
-    return {
-      error: `fb_dtsg bootstrap request failed: ${redactCookie(cookie, (err as Error).message)}`,
-      sessionInvalid: false,
-    };
+  const candidates: Array<{ url: string; ua: string }> = [
+    ...hintUrls.map((url) => ({ url, ua: USER_AGENT })),
+    { url: "https://www.facebook.com/", ua: USER_AGENT },
+    { url: "https://web.facebook.com/", ua: USER_AGENT },
+    { url: "https://m.facebook.com/", ua: IPHONE_USER_AGENT },
+  ];
+  let sawInvalid = 0;
+  let sawOk = 0;
+  let lastFetchError: string | null = null;
+  for (const candidate of candidates) {
+    let html: string;
+    let finalUrl: string;
+    try {
+      const res = await fetch(candidate.url, {
+        headers: {
+          "User-Agent": candidate.ua,
+          "Accept-Language": "en-US,en;q=0.9",
+          Cookie: cookie,
+        },
+        redirect: "follow",
+        signal: AbortSignal.timeout(GRAPHQL_TIMEOUT_MS),
+      });
+      finalUrl = res.url;
+      html = await res.text();
+      if (!res.ok) continue;
+    } catch (err) {
+      lastFetchError = redactCookie(cookie, (err as Error).message);
+      continue;
+    }
+    if (classifySessionResponse(finalUrl, html) === "invalid") {
+      sawInvalid++;
+      continue;
+    }
+    sawOk++;
+    const token = extractDtsgToken(html);
+    if (token) return { token };
   }
-  if (classifySessionResponse(finalUrl, html) === "invalid") {
+  if (sawOk === 0 && sawInvalid > 0) {
     return {
       error:
         "dedicated session invalid/expired or checkpointed — Facebook " +
-        "answered the homepage bootstrap with a login/checkpoint page. " +
+        "answered the bootstrap pages with login/checkpoint pages. " +
         "Re-supply FB_SESSION_COOKIE from the dedicated account.",
       sessionInvalid: true,
     };
   }
-  const token =
-    html.match(/"DTSGInitialData",\[\],\{"token":"([^"]+)"/)?.[1] ??
-    html.match(/"DTSGInitialData"[\s\S]{0,160}?"token":"([^"]+)"/)?.[1] ??
-    html.match(/"async_get_token":"([^"]+)"/)?.[1] ??
-    null;
-  if (!token) {
-    return {
-      error:
-        "fb_dtsg token not found in the homepage payload (layout " +
-        "changed, or the session was served a stripped page)",
-      sessionInvalid: false,
-    };
-  }
-  return { token };
+  return {
+    error:
+      "fb_dtsg token not found on any bootstrap page " +
+      `(${sawOk} authenticated page(s) carried no token` +
+      (lastFetchError ? `; last fetch error: ${lastFetchError}` : "") +
+      ") — layout changed, or the session is served stripped pages",
+    sessionInvalid: false,
+  };
 }
 
 /**
@@ -824,8 +863,9 @@ async function discoverStoryBucketId(
     { url: `https://m.facebook.com/${path}`, ua: IPHONE_USER_AGENT },
     { url: `https://www.facebook.com/${path}`, ua: IPHONE_USER_AGENT },
   ];
-  let lastError = "no variant answered";
+  const outcomes: string[] = [];
   for (const variant of variants) {
+    const host = new URL(variant.url).hostname;
     let html: string;
     let finalUrl: string;
     try {
@@ -841,11 +881,13 @@ async function discoverStoryBucketId(
       finalUrl = res.url;
       html = await res.text();
       if (!res.ok) {
-        lastError = `profile page answered HTTP ${res.status} (${new URL(variant.url).hostname})`;
+        outcomes.push(`${host}: HTTP ${res.status}`);
         continue;
       }
     } catch (err) {
-      lastError = `profile page request failed: ${redactCookie(cookie, (err as Error).message)}`;
+      outcomes.push(
+        `${host}: request failed (${redactCookie(cookie, (err as Error).message)})`
+      );
       continue;
     }
     if (classifySessionResponse(finalUrl, html) === "invalid") {
@@ -860,17 +902,25 @@ async function discoverStoryBucketId(
     const norm = normalizeSsrJson(html);
     const bucketId =
       norm.match(
-        /"story_bucket"\s*:\s*\{\s*"nodes"\s*:\s*\[\s*\{\s*"id"\s*:\s*"(\d{6,})"/
+        /"story_bucket"\s*:\s*\{\s*"nodes"\s*:\s*\[[\s\S]{0,240}?"id"\s*:\s*"(\d{6,})"/
       )?.[1] ??
       norm.match(/"story_bucket_id"\s*:\s*"(\d{6,})"/)?.[1] ??
+      // The story ring on a profile links straight at the viewer;
+      // any /stories/{bucket}/ URL in the page names the bucket.
+      norm.match(/\/stories\/(\d{6,})\//)?.[1] ??
       null;
     if (bucketId) return { bucketId, error: null, sessionInvalid: false };
-    lastError =
-      "profile page carried no story_bucket node — the person has " +
-      "no active story right now, the story ring is not visible to " +
-      "the dedicated account, or the layout changed";
+    outcomes.push(`${host}: authenticated page, no bucket found`);
   }
-  return { bucketId: null, error: lastError, sessionInvalid: false };
+  return {
+    bucketId: null,
+    error:
+      "profile bucket discovery found nothing on any host variant — " +
+      outcomes.join("; ") +
+      " (the person may have no active story, the story ring is not " +
+      "visible to the dedicated account, or the layout changed)",
+    sessionInvalid: false,
+  };
 }
 
 /**
@@ -881,13 +931,14 @@ async function discoverStoryBucketId(
 async function fetchViaSessionGraphql(args: {
   bucketId: string;
   cookie: string;
+  bootstrapHintUrls?: string[];
 }): Promise<
   | { ok: true; items: MediaItem[] }
   | { ok: false; error: string; sessionInvalid: boolean }
 > {
   const { bucketId, cookie } = args;
 
-  const dtsg = await fetchFbDtsg(cookie);
+  const dtsg = await fetchFbDtsg(cookie, args.bootstrapHintUrls ?? []);
   if ("error" in dtsg) {
     return { ok: false, error: dtsg.error, sessionInvalid: dtsg.sessionInvalid };
   }
