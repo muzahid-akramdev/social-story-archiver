@@ -1063,6 +1063,14 @@ async function fetchViaSessionGraphql(args: {
     };
   }
 
+  // A tiny body is a refusal slip, not data — quote it (sanitised:
+  // cookie values scrubbed, whitespace collapsed, capped) so the
+  // objection is named exactly instead of guessed at.
+  const bodySnippet =
+    text.length <= 1200
+      ? `: body=${redactCookie(cookie, text).replace(/\s+/g, " ").slice(0, 400)}`
+      : "";
+
   // Shape census (counts and key presence only — never URLs or media
   // content): makes the next diagnosis decisive instead of speculative.
   const census = [
@@ -1082,20 +1090,25 @@ async function fetchViaSessionGraphql(args: {
     ok: false,
     error:
       `GraphQL bucket query returned no media for bucket ${bucketId} ` +
-      `(shape census: ${census}) — bucket empty/expired, its audience ` +
-      "is not visible to the dedicated account, or the response shape " +
-      "differs from the documented one",
+      `(shape census: ${census}${bodySnippet}) — bucket empty/expired, ` +
+      "its audience is not visible to the dedicated account, or the " +
+      "response shape differs from the documented one",
     sessionInvalid: false,
   };
 }
 
-/** First GraphQL errors[].message across the NDJSON lines, if any. */
+/** First GraphQL error message across the NDJSON lines, if any. */
 function firstGraphqlError(text: string): string | null {
   for (const obj of parseGraphqlLines(text)) {
     const errs = (obj as { errors?: Array<{ message?: string }> }).errors;
     if (Array.isArray(errs) && errs.length > 0 && errs[0]?.message) {
       return errs[0].message;
     }
+    const single = (
+      obj as { error?: { message?: string; summary?: string } }
+    ).error;
+    if (single?.message) return single.message;
+    if (single?.summary) return single.summary;
   }
   return null;
 }
