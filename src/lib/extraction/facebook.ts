@@ -786,11 +786,16 @@ async function fetchFbDtsg(
     { url: "https://www.facebook.com/", ua: USER_AGENT },
     { url: "https://web.facebook.com/", ua: USER_AGENT },
     { url: "https://m.facebook.com/", ua: IPHONE_USER_AGENT },
+    // mbasic is served to almost anything and its forms carry fb_dtsg
+    // as a plain hidden input — the most token-friendly surface FB has.
+    { url: "https://mbasic.facebook.com/", ua: USER_AGENT },
+    { url: "https://mbasic.facebook.com/", ua: IPHONE_USER_AGENT },
   ];
   let sawInvalid = 0;
   let sawOk = 0;
-  let lastFetchError: string | null = null;
+  const outcomes: string[] = [];
   for (const candidate of candidates) {
+    const host = new URL(candidate.url).hostname;
     let html: string;
     let finalUrl: string;
     try {
@@ -805,13 +810,17 @@ async function fetchFbDtsg(
       });
       finalUrl = res.url;
       html = await res.text();
-      if (!res.ok) continue;
+      if (!res.ok) {
+        outcomes.push(`${host}${candidate.url.includes("stories") ? "/stories" : ""}: HTTP ${res.status}`);
+        continue;
+      }
     } catch (err) {
-      lastFetchError = redactCookie(cookie, (err as Error).message);
+      outcomes.push(`${host}: fetch failed`);
       continue;
     }
     if (classifySessionResponse(finalUrl, html) === "invalid") {
       sawInvalid++;
+      outcomes.push(`${host}: login/checkpoint`);
       continue;
     }
     sawOk++;
@@ -823,6 +832,7 @@ async function fetchFbDtsg(
     const token =
       extractDtsgToken(html) ?? extractDtsgToken(normalizeSsrJson(html));
     if (token) return { token };
+    outcomes.push(`${host}: authenticated, no token`);
   }
   if (sawOk === 0 && sawInvalid > 0) {
     return {
@@ -835,10 +845,8 @@ async function fetchFbDtsg(
   }
   return {
     error:
-      "fb_dtsg token not found on any bootstrap page " +
-      `(${sawOk} authenticated page(s) carried no token` +
-      (lastFetchError ? `; last fetch error: ${lastFetchError}` : "") +
-      ") — layout changed, or the session is served stripped pages",
+      "fb_dtsg token not found on any bootstrap page — " +
+      outcomes.join("; "),
     sessionInvalid: false,
   };
 }
