@@ -769,19 +769,68 @@ function extractDtsgToken(html: string): string | null {
   );
 }
 
+type CometBootstrap = {
+  dtsg: string;
+  /** Extra Comet request fields mined from the SAME page (lsd, __rev, …). */
+  fields: Record<string, string>;
+};
+
 /**
- * Bootstrap fb_dtsg for the dedicated session. Fetched fresh for every
- * crawl — the token is session-bound and rotates. The plain homepage
- * is tried but is NOT trusted alone: from datacenter IPs it can be a
- * stripped variant with no boot payload at all (verified live
- * 2026-11-10 — authenticated, yet no DTSGInitialData). Full Comet app
- * pages (the stories page) and the mobile site (hidden fb_dtsg form
- * inputs) carry the token far more reliably, so all are tried.
+ * Mine the full Comet bootstrap set from one authenticated page.
+ * A bare fb_dtsg is NOT enough for api/graphql from a cold server
+ * POST: Facebook answers error 1357004 ("Sorry, something went
+ * wrong") when the request lacks the page's own boot fields
+ * (verified live 2026-11-10 — the minimal userscript field set works
+ * inside a real browser page, not from a server). The fields below
+ * are the set server-side Comet callers mine from the page HTML.
+ */
+function extractCometBootstrap(html: string): CometBootstrap | null {
+  const norm = normalizeSsrJson(html);
+  const dtsg = extractDtsgToken(html) ?? extractDtsgToken(norm);
+  if (!dtsg) return null;
+  const grab = (re: RegExp): string | null => norm.match(re)?.[1] ?? null;
+  const fields: Record<string, string> = {};
+  const put = (key: string, value: string | null) => {
+    if (value) fields[key] = value;
+  };
+  put("lsd", grab(/"LSD",\[\],\{"token":"([^"]+)"/) ?? grab(/"lsd":"([^"]+)"/));
+  put("__rev", grab(/"client_revision":(\d+)/) ?? grab(/"__rev":(\d+)/));
+  put("__spin_r", grab(/"__spin_r":(\d+)/));
+  put("__spin_b", grab(/"__spin_b":"([^"]+)"/));
+  put("__spin_t", grab(/"__spin_t":(\d+)/));
+  put("__hsi", grab(/"hsi":"([^"]+)"/));
+  put("__hs", grab(/"haste_session":"([^"]+)"/));
+  put("__dyn", grab(/"__dyn":"([^"]+)"/));
+  put("__csr", grab(/"__csr":"([^"]+)"/));
+  // jazoest is derived from the dtsg itself: "2" + sum of char codes.
+  const jazoest =
+    "2" +
+    dtsg
+      .split("")
+      .reduce((acc, ch) => acc + ch.charCodeAt(0), 0)
+      .toString();
+  fields.jazoest = jazoest;
+  return { dtsg, fields };
+}
+
+/**
+ * Bootstrap the Comet token set for the dedicated session. Fetched
+ * fresh for every crawl — the tokens are session-bound and rotate.
+ * The plain homepage is tried but is NOT trusted alone: from
+ * datacenter IPs it can be a stripped variant with no boot payload at
+ * all (verified live 2026-11-10 — authenticated, yet no
+ * DTSGInitialData). Full Comet app pages (the stories page) and the
+ * mobile site (hidden fb_dtsg form inputs) carry tokens far more
+ * reliably, so all are tried; the FIRST page yielding a dtsg donates
+ * the whole set, so every field comes from one consistent page load.
  */
 async function fetchFbDtsg(
   cookie: string,
   hintUrls: string[] = []
-): Promise<{ token: string } | { error: string; sessionInvalid: boolean }> {
+): Promise<
+  | { token: string; fields: Record<string, string> }
+  | { error: string; sessionInvalid: boolean }
+> {
   const candidates: Array<{ url: string; ua: string }> = [
     ...hintUrls.map((url) => ({ url, ua: USER_AGENT })),
     { url: "https://www.facebook.com/", ua: USER_AGENT },
@@ -825,14 +874,8 @@ async function fetchFbDtsg(
       continue;
     }
     sawOk++;
-    // Comet payloads escape-encode their boot JSON inside script
-    // strings (\"DTSGInitialData\",[],{\"token\":…}) — mine the token
-    // from the normalised text, not the raw HTML (live-verified miss
-    // 2026-11-10: authenticated stories page, token present in the
-    // payload but invisible to raw-HTML regexes).
-    const token =
-      extractDtsgToken(html) ?? extractDtsgToken(normalizeSsrJson(html));
-    if (token) return { token };
+    const boot = extractCometBootstrap(html);
+    if (boot) return { token: boot.dtsg, fields: boot.fields };
     outcomes.push(`${host}: authenticated, no token`);
   }
   if (sawOk === 0 && sawInvalid > 0) {
@@ -988,12 +1031,20 @@ async function fetchViaSessionGraphql(args: {
     __user: uid,
     __a: "1",
     __req: "t",
+    __comet_req: "1",
+    dpr: "1",
+    __ccg: "GOOD",
     fb_dtsg: dtsg.token,
     fb_api_caller_class: "RelayModern",
     fb_api_req_friendly_name: STORIES_BUCKET_QUERY_NAME,
     variables: JSON.stringify(variables),
     server_timestamps: "true",
     doc_id: STORIES_BUCKET_DOC_ID,
+    // The mined boot fields from the same page the dtsg came from
+    // (lsd, jazoest, __rev, __spin_*, __hsi, __hs, __dyn, __csr —
+    // whichever were present). Without them the endpoint answers
+    // error 1357004 to cold server POSTs.
+    ...dtsg.fields,
   });
 
   let text: string;
