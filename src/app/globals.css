@@ -2,18 +2,144 @@
 @tailwind components;
 @tailwind utilities;
 
+/* Atmosphere: fixed layered glows over the warm near-black base — a soft
+   amber safelight from the top-left, a faint moss counterpoint at the
+   bottom-right, and a deep vignette pulling the edges down. Painted on
+   the body so every page sits in the same darkroom. */
+body {
+  background:
+    radial-gradient(ellipse 65% 50% at 12% -5%, rgb(212 167 44 / 0.16), transparent 60%),
+    radial-gradient(ellipse 55% 45% at 95% 105%, rgb(122 148 113 / 0.12), transparent 60%),
+    radial-gradient(ellipse 130% 100% at 50% 45%, transparent 52%, rgb(0 0 0 / 0.55) 100%),
+    #1c1917;
+  background-attachment: fixed;
+}
+
+/* Film grain: an SVG feTurbulence tile laid over everything at a whisper
+   of opacity. Pure texture — it never catches a click. */
+.film-grain {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  pointer-events: none;
+  opacity: 0.05;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='180' height='180'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='180' height='180' filter='url(%23n)'/%3E%3C/svg%3E");
+  background-size: 180px 180px;
+}
+
+/* Translucent panel for content floating over the darkroom. */
+.glass-panel {
+  background: rgb(255 255 255 / 0.04);
+  -webkit-backdrop-filter: blur(14px);
+  backdrop-filter: blur(14px);
+  border: 1px solid rgb(255 255 255 / 0.1);
+  border-radius: 1rem;
+  box-shadow:
+    0 16px 40px rgb(0 0 0 / 0.35),
+    inset 0 1px 0 rgb(255 255 255 / 0.06);
+}
+.glass-panel-dashed {
+  border-style: dashed;
+  border-color: rgb(255 255 255 / 0.18);
+}
+
+/* The story ring: a conic amber-to-rust sweep, like the gradient ring on
+   a live story — here it means "this person's stories, kept." */
+.story-ring {
+  display: inline-flex;
+  flex-shrink: 0;
+  padding: 2.5px;
+  border-radius: 9999px;
+  background: conic-gradient(from 210deg, #d4a72c, #b0532a, #e9c766, #d4a72c);
+  box-shadow: 0 2px 8px rgb(0 0 0 / 0.25);
+}
+
+/* Amber gradient text for display accents. */
+.text-gold-grad {
+  background: linear-gradient(100deg, #e9c766 0%, #d4a72c 42%, #b8901f 68%, #e9c766 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+/* Entrance motion: a soft rise, staggered with the delay helpers below
+   or an inline animation-delay. */
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateY(16px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+.animate-rise {
+  animation: rise 700ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+.rise-delay-1 { animation-delay: 70ms; }
+.rise-delay-2 { animation-delay: 140ms; }
+.rise-delay-3 { animation-delay: 210ms; }
+.rise-delay-4 { animation-delay: 280ms; }
+.rise-delay-5 { animation-delay: 350ms; }
+.rise-delay-6 { animation-delay: 420ms; }
+
 /* Signature element: every archived item renders like a small instant-film
    frame — thicker cream border at the bottom, a slight resting rotation
    that straightens on hover. Used by StoryGrid. */
 .film-frame {
-  background: theme(colors.paper.DEFAULT);
+  background: linear-gradient(172deg, #faf5ec 0%, #f5f0e8 55%, #ece3d1 100%);
   padding: 10px 10px 34px 10px;
-  box-shadow: 0 6px 16px rgb(0 0 0 / 0.35);
+  box-shadow:
+    0 6px 16px rgb(0 0 0 / 0.35),
+    inset 0 1px 0 rgb(255 255 255 / 0.7);
   transition: transform 180ms ease, box-shadow 180ms ease;
 }
 .film-frame:hover {
   transform: rotate(0deg) scale(1.02) !important;
   box-shadow: 0 10px 24px rgb(0 0 0 / 0.45);
+}
+
+/* A film frame lit by the safelight: the resting shadow plus a soft
+   amber halo, for the one frame on the page that asks for something. */
+.film-frame-glow {
+  box-shadow:
+    0 10px 28px rgb(0 0 0 / 0.4),
+    0 0 64px rgb(212 167 44 / 0.16),
+    inset 0 1px 0 rgb(255 255 255 / 0.7);
+}
+.film-frame-glow:hover {
+  box-shadow:
+    0 14px 34px rgb(0 0 0 / 0.45),
+    0 0 72px rgb(212 167 44 / 0.22),
+    inset 0 1px 0 rgb(255 255 255 / 0.7);
+}
+
+/* Amber selection, like a highlighter swept over a contact sheet. */
+::selection {
+  background: rgb(212 167 44 / 0.85);
+  color: #1c1917;
+}
+
+/* Slim, quiet scrollbar in darkroom tones. */
+html {
+  scrollbar-width: thin;
+  scrollbar-color: #3a342c #1c1917;
+}
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track {
+  background: #1c1917;
+}
+::-webkit-scrollbar-thumb {
+  background: #3a342c;
+  border: 2px solid #1c1917;
+  border-radius: 8px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #b8901f;
 }
 
 /* Focus visibility, kept even though the palette is dark */
@@ -25,5 +151,7 @@
 @media (prefers-reduced-motion: reduce) {
   * {
     transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+    animation-delay: 0ms !important;
   }
 }

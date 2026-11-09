@@ -5,6 +5,9 @@ import { useRouter } from "next/navigation";
 
 type FolderTypeChoice = "personal_profile" | "page";
 
+const inputClass =
+  "mt-1 w-full rounded-xl border border-ink/15 bg-white/70 px-3.5 py-2.5 text-ink shadow-inner transition placeholder:text-ink/40 focus:border-amber focus:outline-none focus:ring-2 focus:ring-amber/40";
+
 export default function LinkForm() {
   const router = useRouter();
   const [sourceUrl, setSourceUrl] = useState("");
@@ -57,7 +60,7 @@ export default function LinkForm() {
   return (
     <form
       onSubmit={handleSubmit}
-      className="film-frame max-w-lg -rotate-1.5 mx-auto sm:mx-0"
+      className="film-frame film-frame-glow max-w-lg -rotate-1.5 mx-auto sm:mx-0"
     >
       <h2 className="font-display text-2xl text-ink mb-4">Archive a story</h2>
 
@@ -71,7 +74,7 @@ export default function LinkForm() {
           value={sourceUrl}
           onChange={(e) => setSourceUrl(e.target.value)}
           placeholder="https://facebook.com/… or …/stories/…"
-          className="mt-1 w-full bg-white/60 border border-ink/20 rounded px-3 py-2 text-ink placeholder:text-ink/40"
+          className={inputClass}
         />
         <span className="mt-1 block text-xs text-ink/50">
           Either link creates a folder for that person — the crawler
@@ -83,15 +86,19 @@ export default function LinkForm() {
         <span className="font-mono text-xs uppercase tracking-wide text-ink/70">
           Folder type
         </span>
-        <div className="mt-1 flex gap-2" role="group" aria-label="Folder type">
+        <div
+          className="mt-1 inline-flex rounded-full border border-ink/15 bg-ink/5 p-1"
+          role="group"
+          aria-label="Folder type"
+        >
           <button
             type="button"
             aria-pressed={folderType === "personal_profile"}
             onClick={() => setFolderType("personal_profile")}
             className={
               folderType === "personal_profile"
-                ? "bg-ink text-white rounded px-3 py-2 text-sm font-medium"
-                : "bg-white/60 border border-ink/20 text-ink rounded px-3 py-2 text-sm"
+                ? "rounded-full bg-ink px-4 py-1.5 text-sm font-medium text-paper shadow"
+                : "rounded-full px-4 py-1.5 text-sm text-ink/60 transition-colors hover:text-ink"
             }
           >
             Personal Profile
@@ -102,8 +109,8 @@ export default function LinkForm() {
             onClick={() => setFolderType("page")}
             className={
               folderType === "page"
-                ? "bg-ink text-white rounded px-3 py-2 text-sm font-medium"
-                : "bg-white/60 border border-ink/20 text-ink rounded px-3 py-2 text-sm"
+                ? "rounded-full bg-ink px-4 py-1.5 text-sm font-medium text-paper shadow"
+                : "rounded-full px-4 py-1.5 text-sm text-ink/60 transition-colors hover:text-ink"
             }
           >
             Page
@@ -125,7 +132,7 @@ export default function LinkForm() {
           value={friendName}
           onChange={(e) => setFriendName(e.target.value)}
           placeholder="Leave blank to use the name from the link"
-          className="mt-1 w-full bg-white/60 border border-ink/20 rounded px-3 py-2 text-ink placeholder:text-ink/40"
+          className={inputClass}
         />
       </label>
 
@@ -135,17 +142,21 @@ export default function LinkForm() {
           checked={consentConfirmed}
           onChange={(e) => setConsentConfirmed(e.target.checked)}
           required
-          className="mt-1"
+          className="mt-1 h-4 w-4 shrink-0 accent-[#D4A72C]"
         />
         <span>I have this person&rsquo;s permission to archive their stories.</span>
       </label>
 
-      {error && <p className="text-rust text-sm mb-3">{error}</p>}
+      {error && (
+        <p className="mb-3 rounded-lg border border-rust/30 bg-rust/10 px-3 py-2 text-sm text-rust">
+          {error}
+        </p>
+      )}
 
       <button
         type="submit"
         disabled={submitting || !consentConfirmed}
-        className="bg-amber hover:bg-amber-dim disabled:opacity-40 disabled:cursor-not-allowed text-darkroom font-medium rounded px-4 py-2 transition-colors"
+        className="w-full rounded-xl bg-gradient-to-b from-[#E9C766] to-amber px-4 py-3 font-semibold text-darkroom shadow-lg shadow-amber/25 transition-all hover:-translate-y-0.5 hover:to-amber-dim disabled:translate-y-0 disabled:cursor-not-allowed disabled:opacity-40 disabled:shadow-none"
       >
         {submitting ? "Archiving\u2026" : "Archive"}
       </button>
