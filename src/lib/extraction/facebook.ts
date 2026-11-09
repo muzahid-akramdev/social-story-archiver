@@ -815,7 +815,13 @@ async function fetchFbDtsg(
       continue;
     }
     sawOk++;
-    const token = extractDtsgToken(html);
+    // Comet payloads escape-encode their boot JSON inside script
+    // strings (\"DTSGInitialData\",[],{\"token\":…}) — mine the token
+    // from the normalised text, not the raw HTML (live-verified miss
+    // 2026-11-10: authenticated stories page, token present in the
+    // payload but invisible to raw-HTML regexes).
+    const token =
+      extractDtsgToken(html) ?? extractDtsgToken(normalizeSsrJson(html));
     if (token) return { token };
   }
   if (sawOk === 0 && sawInvalid > 0) {
