@@ -90,7 +90,10 @@ export async function POST(req: NextRequest) {
         newStories += result.newStories;
         if (result.failed > 0) {
           errors.push(
-            `${link.label || link.friend_name}: ${result.failed} item(s) failed to archive`
+            `${link.label || link.friend_name}: ${result.failed} item(s) failed to archive` +
+              (result.errors && result.errors.length > 0
+                ? ` — ${result.errors.join("; ")}`
+                : "")
           );
         }
       } else {

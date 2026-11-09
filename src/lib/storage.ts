@@ -15,6 +15,8 @@ export type SyncOutcome = {
   newStories: number;
   skippedDuplicates: number;
   failed: number;
+  /** Per-item failure reasons (media type + host + message; never a full signed URL). */
+  errors: string[];
   /** Set when this sync produced a ZIP archive (images were bundled). */
   archiveId: string | null;
   zipPath: string | null;
@@ -56,6 +58,7 @@ export async function syncExtractedMedia(
     newStories: 0,
     skippedDuplicates: 0,
     failed: 0,
+    errors: [],
     archiveId: null,
     zipPath: null,
     zipSizeBytes: 0,
@@ -100,8 +103,19 @@ export async function syncExtractedMedia(
         }
       }
 
-      const res = await fetch(item.mediaUrl);
-      if (!res.ok) throw new Error(`fetch ${res.status}`);
+      // CDN media URLs are signed but host-checked: fbcdn answers a
+      // bare server fetch with 403 often enough that a browser UA +
+      // Facebook referer is the reliable shape. A plain GET of a CDN
+      // file never registers a story view.
+      const res = await fetch(item.mediaUrl, {
+        headers: {
+          "User-Agent":
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+          Referer: "https://www.facebook.com/",
+          "Accept-Language": "en-US,en;q=0.9",
+        },
+      });
+      if (!res.ok) throw new Error(`media fetch HTTP ${res.status}`);
       const bytes = await res.arrayBuffer();
       const finalHash = hash ?? contentHashFromBytes(bytes);
       const storyId = crypto.randomUUID();
@@ -185,6 +199,15 @@ export async function syncExtractedMedia(
     } catch (err) {
       console.error("syncExtractedMedia item failed:", err);
       outcome.failed++;
+      let host = "unknown-host";
+      try {
+        host = new URL(item.mediaUrl).hostname;
+      } catch {
+        /* keep placeholder */
+      }
+      outcome.errors.push(
+        `${item.mediaType} via ${host}: ${(err as Error).message}`.slice(0, 300)
+      );
     }
   }
 

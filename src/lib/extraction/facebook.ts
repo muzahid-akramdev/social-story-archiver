@@ -229,6 +229,7 @@ export async function fetchAndParseFacebookMedia(
       const viaSession = await fetchViaSessionSsr({
         pageUrl,
         storyId,
+        bucketId,
         storyPhpUrl:
           storyId && ownerId
             ? `https://www.facebook.com/story.php?story_fbid=${encodeURIComponent(storyId)}&id=${encodeURIComponent(ownerId)}`
@@ -249,6 +250,24 @@ export async function fetchAndParseFacebookMedia(
   }
 
   // ---- Strategy 3: session-free fetch of the supplied URL -----------
+  // Guard: never run the generic page parser against a PROFILE link.
+  // A public profile page's og:image is the profile photo, not a story
+  // (verified live 2026-11-10: a profile-link folder "found" exactly
+  // one item — the poster's profile picture). Profile folders live or
+  // die by strategies 1–2; say so honestly instead of archiving the
+  // wrong media.
+  if (urlIdentity.kind === "profile") {
+    return {
+      ok: false,
+      error: withNotes(
+        "profile link: no story media route for a bare profile folder " +
+          "yet — the generic page fetch is disabled for profile links " +
+          "because a profile page's public media is the profile photo, " +
+          "not a story. Add the same person with a story link so the " +
+          "session route has a bucket to fetch."
+      ),
+    };
+  }
   const anon = await fetchAndParse(url, null);
   if (anon.ok) return anon;
 
@@ -514,13 +533,14 @@ export function classifySessionResponse(
 async function fetchViaSessionSsr(args: {
   pageUrl: string;
   storyId: string;
+  bucketId: string | null;
   storyPhpUrl: string | null;
   cookie: string;
 }): Promise<
   | { ok: true; items: MediaItem[] }
   | { ok: false; error: string; sessionInvalid: boolean }
 > {
-  const { pageUrl, storyId, storyPhpUrl, cookie } = args;
+  const { pageUrl, storyId, bucketId, storyPhpUrl, cookie } = args;
   const sessionInvalid = (where: string) => ({
     ok: false as const,
     sessionInvalid: true,
@@ -530,30 +550,55 @@ async function fetchViaSessionSsr(args: {
       "Re-supply FB_SESSION_COOKIE from the dedicated account.",
   });
 
-  // Leg 1: the authenticated /stories/{bucket}/{token}/ page.
-  try {
-    const res = await fetch(pageUrl, {
-      headers: {
-        "User-Agent": USER_AGENT,
-        "Accept-Language": "en-US,en;q=0.9",
-        Cookie: cookie,
-      },
-      redirect: "follow",
-      signal: AbortSignal.timeout(SESSION_SSR_TIMEOUT_MS),
-    });
-    const html = await res.text();
-    if (classifySessionResponse(res.url, html) === "invalid") {
-      return sessionInvalid("stories page");
+  // Leg 1: the authenticated /stories/{bucket}/{token}/ page, across
+  // host variants. The desktop www host serves a client-rendered shell
+  // whose SSR payload may not embed a non-tray bucket's media at all
+  // (verified live 2026-11-10: authenticated page, zero media near the
+  // story id); web/m hosts have historically carried fuller SSR (the
+  // same hosts that made storyphp-og work), so try them all before
+  // concluding. Only when EVERY host answers login/checkpoint is the
+  // session itself judged invalid.
+  const hostVariants = Array.from(
+    new Set([
+      pageUrl,
+      pageUrl.replace("www.facebook.com", "web.facebook.com"),
+      pageUrl.replace("www.facebook.com", "m.facebook.com"),
+    ])
+  );
+  let leg1Invalid = 0;
+  let leg1FetchError: string | null = null;
+  for (const variantUrl of hostVariants) {
+    try {
+      const res = await fetch(variantUrl, {
+        headers: {
+          "User-Agent": USER_AGENT,
+          "Accept-Language": "en-US,en;q=0.9",
+          Cookie: cookie,
+        },
+        redirect: "follow",
+        signal: AbortSignal.timeout(SESSION_SSR_TIMEOUT_MS),
+      });
+      const html = await res.text();
+      if (classifySessionResponse(res.url, html) === "invalid") {
+        leg1Invalid++;
+        continue;
+      }
+      if (res.ok) {
+        const items = parseStoryBucketMedia(html, storyId, bucketId);
+        if (items.length > 0) return { ok: true, items };
+      }
+    } catch (err) {
+      leg1FetchError = redactCookie(cookie, (err as Error).message);
     }
-    if (res.ok) {
-      const items = parseStoryBucketMedia(html, storyId);
-      if (items.length > 0) return { ok: true, items };
-    }
-  } catch (err) {
+  }
+  if (leg1Invalid === hostVariants.length) {
+    return sessionInvalid("stories page");
+  }
+  if (leg1FetchError && leg1Invalid === 0) {
     return {
       ok: false,
       sessionInvalid: false,
-      error: `stories page request failed: ${redactCookie(cookie, (err as Error).message)}`,
+      error: `stories page request failed: ${leg1FetchError}`,
     };
   }
 
@@ -574,7 +619,7 @@ async function fetchViaSessionSsr(args: {
         return sessionInvalid("story.php");
       }
       if (res.ok) {
-        const items = parseStoryBucketMedia(html, storyId);
+        const items = parseStoryBucketMedia(html, storyId, bucketId);
         if (items.length > 0) return { ok: true, items };
         // The story.php page is specific to this one story, so its OG
         // media is this story's — full-size payload permitting.
@@ -647,13 +692,19 @@ type BucketCandidate = {
  */
 export function parseStoryBucketMedia(
   html: string,
-  storyId: string
+  storyId: string,
+  bucketId?: string | null
 ): MediaItem[] {
   if (!html || !storyId) return [];
   const norm = normalizeSsrJson(html);
 
+  // Anchors: the story id, its token form, and the bucket id — payload
+  // blobs group a bucket's cards under the bucket node, whose media may
+  // sit nearer the bucket id than any single card's id.
+  const needles = [storyId, `S:_ISC:${storyId}`];
+  if (bucketId) needles.push(bucketId);
   const anchors: number[] = [];
-  for (const needle of [storyId, `S:_ISC:${storyId}`]) {
+  for (const needle of needles) {
     let from = 0;
     for (;;) {
       const i = norm.indexOf(needle, from);
