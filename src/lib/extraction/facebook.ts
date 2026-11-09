@@ -214,18 +214,61 @@ export async function fetchAndParseFacebookMedia(
     }
   }
 
-  // ---- Strategy 2: session-ssr (dedicated account, query-only) ------
+  // ---- Strategy 2: session routes (dedicated account, query-only) ---
   // The full-coverage path for pure stories and Page stories. Skipped
   // with a named diagnostic when FB_SESSION_COOKIE is unset — the
   // caller (recheck) passes the cookie in; it is never read from the
   // client and never logged (see redactCookie below).
+  //
+  // 2a (primary): session-graphql — the story viewer's own bucket
+  // prefetcher query (StoriesViewerBucketPrefetcherMultiBucketsQuery),
+  // called query-only with the dedicated session. The /stories/ page's
+  // SSR does NOT embed a non-tray bucket's media (verified live
+  // 2026-11-10 across www/web/m hosts), so the data query is the real
+  // path — the same conclusion BraveDown-class services embody. When
+  // the folder knows no bucket (profile-link folders), the bucket is
+  // first discovered from the profile page's session SSR
+  // (profile_header_renderer story_bucket nodes).
+  // 2b (fallback): session-ssr page scrape, as before.
   if (sessionCookie) {
+    let sessionInvalid = false;
+
+    let gqlBucketId = bucketId;
+    if (!gqlBucketId && ownerId) {
+      const disc = await discoverStoryBucketId(ownerId, sessionCookie);
+      if (disc.bucketId) {
+        gqlBucketId = disc.bucketId;
+      } else {
+        notes.push(`bucket discovery failed: ${disc.error}`);
+        if (disc.sessionInvalid) sessionInvalid = true;
+      }
+    }
+    if (gqlBucketId && !sessionInvalid) {
+      const viaGql = await fetchViaSessionGraphql({
+        bucketId: gqlBucketId,
+        cookie: sessionCookie,
+      });
+      if (viaGql.ok) return viaGql;
+      notes.push(`session-graphql failed: ${viaGql.error}`);
+      if (viaGql.sessionInvalid) sessionInvalid = true;
+    } else if (!gqlBucketId && !ownerId) {
+      notes.push(
+        "session-graphql skipped: no bucket id and no owner identity " +
+          "for this folder"
+      );
+    }
+
     const pageUrl = url.includes("/stories/")
       ? url
       : bucketId && storyId
         ? buildStoriesPageUrl(bucketId, storyId)
         : null;
-    if (pageUrl && storyId) {
+    if (sessionInvalid) {
+      notes.push(
+        "session-ssr skipped: the dedicated session was judged " +
+          "invalid/expired by the GraphQL route"
+      );
+    } else if (pageUrl && storyId) {
       const viaSession = await fetchViaSessionSsr({
         pageUrl,
         storyId,
@@ -661,6 +704,446 @@ async function fetchViaSessionSsr(args: {
       "only stories need the dedicated account to be friends with " +
       "the poster; Page stories need it to follow the Page)",
   };
+}
+
+/* ------------------------------------------------------------------ */
+/* Strategy 2a — session-graphql (dedicated account, query-only).      */
+/*                                                                     */
+/* ┌─ NEVER-SEEN GUARD (hard requirement — do not weaken) ──────────┐ */
+/* │ This is a READ query — the same prefetcher the story viewer     │ */
+/* │ itself fires to LOAD bucket data. Registering a view is a       │ */
+/* │ separate mutation family (storiesUpdateSeenStateMutation,       │ */
+/* │ StoriesReaderUpdateSeenStateMutation, CometStoriesSeenMutation) │ */
+/* │ that this code must NEVER call. A query-only caller therefore   │ */
+/* │ never appears in a poster's viewers list.                       │ */
+/* └─────────────────────────────────────────────────────────────────┘ */
+/*                                                                     */
+/* Query identity (public-source research, 2026-11-10 — see            */
+/* ~/workspace/research_notes/fb-stories-graphql-query.md): the name + */
+/* doc_id pair is carried identically by a live userscript caller and  */
+/* by facebook-cli (HEAD 2026-11-08), which allowlists exactly this    */
+/* query for story traffic. doc_ids rotate every few weeks; a          */
+/* document-not-found answer is surfaced distinctly so the id can be   */
+/* re-harvested by friendly name.                                      */
+/* ------------------------------------------------------------------ */
+
+const GRAPHQL_TIMEOUT_MS = 20_000;
+const STORIES_BUCKET_QUERY_NAME =
+  "StoriesViewerBucketPrefetcherMultiBucketsQuery";
+const STORIES_BUCKET_DOC_ID = "9340191609394579";
+
+function cookieValue(cookie: string, name: string): string | null {
+  for (const part of cookie.split(";")) {
+    const eq = part.indexOf("=");
+    if (eq <= 0) continue;
+    if (part.slice(0, eq).trim() === name) return part.slice(eq + 1).trim();
+  }
+  return null;
+}
+
+type SessionProbe =
+  | { ok: true }
+  | { ok: false; error: string; sessionInvalid: boolean };
+
+/**
+ * Bootstrap fb_dtsg for the dedicated session: one GET of the homepage
+ * with the session cookie, token mined from the SSR. Fetched fresh for
+ * every crawl — the token is session-bound and rotates.
+ */
+async function fetchFbDtsg(
+  cookie: string
+): Promise<{ token: string } | { error: string; sessionInvalid: boolean }> {
+  let html: string;
+  let finalUrl: string;
+  try {
+    const res = await fetch("https://www.facebook.com/", {
+      headers: {
+        "User-Agent": USER_AGENT,
+        "Accept-Language": "en-US,en;q=0.9",
+        Cookie: cookie,
+      },
+      redirect: "follow",
+      signal: AbortSignal.timeout(GRAPHQL_TIMEOUT_MS),
+    });
+    finalUrl = res.url;
+    html = await res.text();
+  } catch (err) {
+    return {
+      error: `fb_dtsg bootstrap request failed: ${redactCookie(cookie, (err as Error).message)}`,
+      sessionInvalid: false,
+    };
+  }
+  if (classifySessionResponse(finalUrl, html) === "invalid") {
+    return {
+      error:
+        "dedicated session invalid/expired or checkpointed — Facebook " +
+        "answered the homepage bootstrap with a login/checkpoint page. " +
+        "Re-supply FB_SESSION_COOKIE from the dedicated account.",
+      sessionInvalid: true,
+    };
+  }
+  const token =
+    html.match(/"DTSGInitialData",\[\],\{"token":"([^"]+)"/)?.[1] ??
+    html.match(/"DTSGInitialData"[\s\S]{0,160}?"token":"([^"]+)"/)?.[1] ??
+    html.match(/"async_get_token":"([^"]+)"/)?.[1] ??
+    null;
+  if (!token) {
+    return {
+      error:
+        "fb_dtsg token not found in the homepage payload (layout " +
+        "changed, or the session was served a stripped page)",
+      sessionInvalid: false,
+    };
+  }
+  return { token };
+}
+
+/**
+ * Discover a profile's CURRENT story bucket id from the profile page's
+ * session SSR: profile_header_renderer embeds user.story_bucket.nodes[]
+ * (bucket id + first story). Query-only GET; no player, no seen call.
+ */
+async function discoverStoryBucketId(
+  ownerId: string,
+  cookie: string
+): Promise<{
+  bucketId: string | null;
+  error: string | null;
+  sessionInvalid: boolean;
+}> {
+  const profileUrl = /^\d+$/.test(ownerId)
+    ? `https://www.facebook.com/profile.php?id=${encodeURIComponent(ownerId)}`
+    : `https://www.facebook.com/${encodeURIComponent(ownerId)}`;
+  let html: string;
+  let finalUrl: string;
+  try {
+    const res = await fetch(profileUrl, {
+      headers: {
+        "User-Agent": USER_AGENT,
+        "Accept-Language": "en-US,en;q=0.9",
+        Cookie: cookie,
+      },
+      redirect: "follow",
+      signal: AbortSignal.timeout(GRAPHQL_TIMEOUT_MS),
+    });
+    finalUrl = res.url;
+    html = await res.text();
+    if (!res.ok) {
+      return {
+        bucketId: null,
+        error: `profile page answered HTTP ${res.status}`,
+        sessionInvalid: false,
+      };
+    }
+  } catch (err) {
+    return {
+      bucketId: null,
+      error: `profile page request failed: ${redactCookie(cookie, (err as Error).message)}`,
+      sessionInvalid: false,
+    };
+  }
+  if (classifySessionResponse(finalUrl, html) === "invalid") {
+    return {
+      bucketId: null,
+      error:
+        "dedicated session invalid/expired or checkpointed — the " +
+        "profile page answered with a login/checkpoint page",
+      sessionInvalid: true,
+    };
+  }
+  const norm = normalizeSsrJson(html);
+  const bucketId =
+    norm.match(
+      /"story_bucket"\s*:\s*\{\s*"nodes"\s*:\s*\[\s*\{\s*"id"\s*:\s*"(\d{6,})"/
+    )?.[1] ??
+    norm.match(/"story_bucket_id"\s*:\s*"(\d{6,})"/)?.[1] ??
+    null;
+  if (!bucketId) {
+    return {
+      bucketId: null,
+      error:
+        "profile page carried no story_bucket node — the person has " +
+        "no active story right now, the story ring is not visible to " +
+        "the dedicated account, or the layout changed",
+      sessionInvalid: false,
+    };
+  }
+  return { bucketId, error: null, sessionInvalid: false };
+}
+
+/**
+ * One query-only POST of the viewer's bucket prefetcher. Returns EVERY
+ * card's media in the bucket (each with its own story id for dedupe),
+ * full-size renditions preferred.
+ */
+async function fetchViaSessionGraphql(args: {
+  bucketId: string;
+  cookie: string;
+}): Promise<
+  | { ok: true; items: MediaItem[] }
+  | { ok: false; error: string; sessionInvalid: boolean }
+> {
+  const { bucketId, cookie } = args;
+
+  const dtsg = await fetchFbDtsg(cookie);
+  if ("error" in dtsg) {
+    return { ok: false, error: dtsg.error, sessionInvalid: dtsg.sessionInvalid };
+  }
+  const uid = cookieValue(cookie, "c_user");
+  if (!uid) {
+    return {
+      ok: false,
+      error: "dedicated cookie carries no c_user — cannot form the query",
+      sessionInvalid: true,
+    };
+  }
+
+  const variables = {
+    bucketIDs: [bucketId],
+    scale: 2,
+    blur: 10,
+    shouldEnableArmadilloStoryReply: true,
+    shouldEnableLiveInStories: true,
+    feedbackSource: 65,
+    useDefaultActor: false,
+    feedLocation: "COMET_MEDIA_VIEWER",
+    focusCommentID: null,
+    shouldDeferLoad: false,
+    isStoriesArchive: false,
+    __relay_internal__pv__IsWorkUserrelayprovider: false,
+  };
+  const body = new URLSearchParams({
+    av: uid,
+    __aaid: "0",
+    __user: uid,
+    __a: "1",
+    __req: "t",
+    fb_dtsg: dtsg.token,
+    fb_api_caller_class: "RelayModern",
+    fb_api_req_friendly_name: STORIES_BUCKET_QUERY_NAME,
+    variables: JSON.stringify(variables),
+    server_timestamps: "true",
+    doc_id: STORIES_BUCKET_DOC_ID,
+  });
+
+  let text: string;
+  try {
+    const res = await fetch("https://www.facebook.com/api/graphql/", {
+      method: "POST",
+      headers: {
+        "User-Agent": USER_AGENT,
+        "Accept-Language": "en-US,en;q=0.9",
+        "Content-Type": "application/x-www-form-urlencoded",
+        "X-Fb-Friendly-Name": STORIES_BUCKET_QUERY_NAME,
+        Origin: "https://www.facebook.com",
+        Referer: "https://www.facebook.com/",
+        Cookie: cookie,
+      },
+      body: body.toString(),
+      redirect: "follow",
+      signal: AbortSignal.timeout(GRAPHQL_TIMEOUT_MS),
+    });
+    text = await res.text();
+    if (!res.ok) {
+      return {
+        ok: false,
+        error: `GraphQL bucket query answered HTTP ${res.status}`,
+        sessionInvalid: res.status === 401 || res.status === 403,
+      };
+    }
+  } catch (err) {
+    return {
+      ok: false,
+      error: `GraphQL bucket query request failed: ${redactCookie(cookie, (err as Error).message)}`,
+      sessionInvalid: false,
+    };
+  }
+
+  if (text.includes("/login") && text.includes("Log into Facebook")) {
+    return {
+      ok: false,
+      error:
+        "dedicated session invalid/expired — the GraphQL endpoint " +
+        "answered with a login page",
+      sessionInvalid: true,
+    };
+  }
+
+  const items = parseGraphqlBucketMedia(text);
+  if (items.length > 0) return { ok: true, items };
+
+  const gqlError = firstGraphqlError(text);
+  if (gqlError) {
+    const rotated = /not found|PersistedQuery|document/i.test(gqlError)
+      ? " (the doc_id may have rotated — re-harvest it by the friendly " +
+        `name ${STORIES_BUCKET_QUERY_NAME})`
+      : "";
+    return {
+      ok: false,
+      error: `GraphQL bucket query error: ${redactCookie(cookie, gqlError)}${rotated}`,
+      sessionInvalid: false,
+    };
+  }
+
+  return {
+    ok: false,
+    error:
+      `GraphQL bucket query returned no media for bucket ${bucketId} ` +
+      "(bucket empty/expired, or its audience is not visible to the " +
+      "dedicated account)",
+    sessionInvalid: false,
+  };
+}
+
+/** First GraphQL errors[].message across the NDJSON lines, if any. */
+function firstGraphqlError(text: string): string | null {
+  for (const obj of parseGraphqlLines(text)) {
+    const errs = (obj as { errors?: Array<{ message?: string }> }).errors;
+    if (Array.isArray(errs) && errs.length > 0 && errs[0]?.message) {
+      return errs[0].message;
+    }
+  }
+  return null;
+}
+
+/** Parse an api/graphql response: NDJSON lines (after any for(;;); guard). */
+function parseGraphqlLines(text: string): Array<Record<string, unknown>> {
+  const cleaned = text.replace(/^for \(;;\);/, "").trim();
+  const out: Array<Record<string, unknown>> = [];
+  for (const line of cleaned.split("\n")) {
+    const t = line.trim();
+    if (!t) continue;
+    try {
+      const parsed = JSON.parse(t) as unknown;
+      if (parsed && typeof parsed === "object") {
+        out.push(parsed as Record<string, unknown>);
+      }
+    } catch {
+      /* not a JSON line — skip */
+    }
+  }
+  if (out.length === 0 && cleaned.startsWith("{")) {
+    try {
+      out.push(JSON.parse(cleaned) as Record<string, unknown>);
+    } catch {
+      /* leave empty */
+    }
+  }
+  return out;
+}
+
+/** Relay node ids for story cards are base64 of `S:_ISC:{numeric id}`. */
+function decodeStoryNodeId(id: unknown): string | null {
+  if (typeof id !== "string" || !id) return null;
+  if (/^\d+$/.test(id)) return id;
+  try {
+    const decoded = Buffer.from(id, "base64").toString("utf-8");
+    const m = decoded.match(/(\d{6,})\s*$/);
+    if (m) return m[1];
+  } catch {
+    /* not base64 */
+  }
+  return null;
+}
+
+type CardMedia = { kind: "image" | "video"; url: string };
+
+/** One story card node's best media (video beats photo if both ride along). */
+function mediaFromStoryCard(node: Record<string, unknown>): CardMedia | null {
+  const attachments = node.attachments as
+    | Array<{ media?: Record<string, unknown> }>
+    | undefined;
+  if (!Array.isArray(attachments)) return null;
+  let image: CardMedia | null = null;
+  for (const att of attachments) {
+    const media = att?.media;
+    if (!media || typeof media !== "object") continue;
+
+    const playable = media.playable_url;
+    if (typeof playable === "string" && playable) {
+      return { kind: "video", url: playable };
+    }
+    const frag = media.videoDeliveryResponseFragment as
+      | Record<string, unknown>
+      | undefined;
+    const result = frag?.videoDeliveryResponseResult as
+      | Record<string, unknown>
+      | undefined;
+    const progressive = result?.progressive_urls as
+      | Array<{
+          progressive_url?: string;
+          metadata?: { quality?: string };
+        }>
+      | undefined;
+    if (Array.isArray(progressive) && progressive.length > 0) {
+      const hd =
+        progressive.find((p) => p.metadata?.quality === "HD") ??
+        progressive[0];
+      if (hd?.progressive_url) {
+        return { kind: "video", url: hd.progressive_url };
+      }
+    }
+
+    const imageObj = media.image as { uri?: string } | undefined;
+    const uri = imageObj?.uri;
+    if (typeof uri === "string" && uri && !image) {
+      // Avatar-class and sticker-class renditions are never the photo.
+      if (!uri.includes("t39.30808-1") && !uri.includes("t39.1997-6")) {
+        image = { kind: "image", url: uri };
+      }
+    }
+  }
+  return image;
+}
+
+/**
+ * Extract every story card's media from a bucket-query response.
+ * Handles both documented connection names (unified_stories in the
+ * direct API shape, unified_stories_with_notes in the SSR-embedded
+ * shape) at any nesting depth. Exported for fixture verification.
+ */
+export function parseGraphqlBucketMedia(text: string): MediaItem[] {
+  const items: MediaItem[] = [];
+  const seenCards = new Set<string>();
+
+  const visit = (value: unknown): void => {
+    if (!value || typeof value !== "object") return;
+    if (Array.isArray(value)) {
+      for (const v of value) visit(v);
+      return;
+    }
+    const obj = value as Record<string, unknown>;
+    for (const key of ["unified_stories", "unified_stories_with_notes"]) {
+      const conn = obj[key] as { edges?: unknown } | undefined;
+      if (conn && Array.isArray(conn.edges)) {
+        for (const edge of conn.edges as Array<{ node?: unknown }>) {
+          const node = edge?.node as Record<string, unknown> | undefined;
+          if (!node || typeof node !== "object") continue;
+          const cardInfo = node.story_card_info as
+            | { story_card_id?: string | number }
+            | undefined;
+          const cardId =
+            (cardInfo?.story_card_id != null
+              ? String(cardInfo.story_card_id)
+              : null) ?? decodeStoryNodeId(node.id);
+          if (!cardId || seenCards.has(cardId)) continue;
+          const media = mediaFromStoryCard(node);
+          if (!media) continue;
+          seenCards.add(cardId);
+          items.push({
+            mediaUrl: media.url,
+            mediaType: media.kind,
+            sourceId: cardId,
+            note: "Full-size media from the session GraphQL bucket query (dedicated account, query-only; no view-logging call is ever made).",
+          });
+        }
+      }
+    }
+    for (const v of Object.values(obj)) visit(v);
+  };
+
+  for (const obj of parseGraphqlLines(text)) visit(obj);
+  return items;
 }
 
 type BucketCandidate = {
