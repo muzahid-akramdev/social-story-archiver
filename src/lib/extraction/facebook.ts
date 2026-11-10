@@ -1110,6 +1110,13 @@ async function discoverStoryBucketId(
     { url: `https://web.facebook.com/${path}`, ua: USER_AGENT },
     { url: `https://m.facebook.com/${path}`, ua: IPHONE_USER_AGENT },
     { url: `https://www.facebook.com/${path}`, ua: IPHONE_USER_AGENT },
+    // Lite hosts appended LAST (2026-11-10): the mweb profile page is a
+    // shell with no story/bucket keys at all (census-verified), while
+    // mbasic/touch serve plain HTML where an active story shows up as a
+    // /stories/{bucket}/ link on the profile. Appending keeps every
+    // existing variant's behaviour and order untouched.
+    { url: `https://mbasic.facebook.com/${path}`, ua: IPHONE_USER_AGENT },
+    { url: `https://touch.facebook.com/${path}`, ua: IPHONE_USER_AGENT },
   ];
   const outcomes: string[] = [];
   for (const variant of variants) {
