@@ -924,11 +924,21 @@ async function fetchFbDtsg(
     { url: "https://www.facebook.com/", ua: USER_AGENT },
     { url: "https://web.facebook.com/", ua: USER_AGENT },
     { url: "https://m.facebook.com/", ua: IPHONE_USER_AGENT },
+    // Mobile-UA variants of the big hosts + the touch site + the
+    // mobile home feed: from some egress networks (Cloudflare IPs,
+    // verified live 2026-11-10) the desktop-UA homepages answer
+    // HTTP 400 and the m/mbasic pages arrive authenticated yet
+    // tokenless, so the donor net is cast wider.
+    { url: "https://www.facebook.com/", ua: IPHONE_USER_AGENT },
+    { url: "https://web.facebook.com/", ua: IPHONE_USER_AGENT },
+    { url: "https://touch.facebook.com/", ua: IPHONE_USER_AGENT },
+    { url: "https://m.facebook.com/home.php", ua: IPHONE_USER_AGENT },
     // mbasic is served to almost anything and its forms carry fb_dtsg
     // as a plain hidden input — the most token-friendly surface FB has.
     { url: "https://mbasic.facebook.com/", ua: USER_AGENT },
     { url: "https://mbasic.facebook.com/", ua: IPHONE_USER_AGENT },
   ];
+  const uid = cookieValue(cookie, "c_user");
   let sawInvalid = 0;
   let sawOk = 0;
   const outcomes: string[] = [];
@@ -963,7 +973,17 @@ async function fetchFbDtsg(
     sawOk++;
     const boot = extractCometBootstrap(html);
     if (boot) return { token: boot.dtsg, fields: boot.fields };
-    outcomes.push(`${host}: authenticated, no token`);
+    // Marker census for the tokenless page (presence/byte counts
+    // only — never values): distinguishes "cookie not honoured"
+    // (own uid absent) from "page variant carries no token at all".
+    const markers = [
+      `bytes=${html.length}`,
+      `uid=${uid ? html.includes(uid) : false}`,
+      `dtsgData=${html.includes("DTSGInitialData")}`,
+      `dtsgInput=${html.includes('name="fb_dtsg"')}`,
+      `lsd=${html.includes('"LSD"') || html.includes('"lsd"')}`,
+    ].join(",");
+    outcomes.push(`${host}: authenticated, no token (${markers})`);
   }
   if (sawOk === 0 && sawInvalid > 0) {
     return {
@@ -976,7 +996,8 @@ async function fetchFbDtsg(
   }
   return {
     error:
-      "fb_dtsg token not found on any bootstrap page — " +
+      `fb_dtsg token not found on any bootstrap page ` +
+      `(egress=${egressProxyConfig() ? "worker" : "direct"}) — ` +
       outcomes.join("; "),
     sessionInvalid: false,
   };
