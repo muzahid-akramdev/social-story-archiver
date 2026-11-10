@@ -851,6 +851,13 @@ function extractDtsgToken(html: string): string | null {
     html.match(/"DTSGInitialData"[\s\S]{0,300}?"token":"([^"]+)"/)?.[1] ??
     html.match(/"DTSGInitData",\[\],\{"token":"([^"]+)"/)?.[1] ??
     html.match(/"dtsg"\s*:\s*\{\s*"token"\s*:\s*"([^"]+)"/)?.[1] ??
+    // Mobile-web boot config form (census-verified live 2026-11-10
+    // via the Worker egress: the ~48 KB m/touch pages carry a bare
+    // "dtsg" key — plain string value, or an object whose first key
+    // is not "token").
+    html.match(/"dtsg"\s*:\s*"([^"]+)"/)?.[1] ??
+    html.match(/"dtsg"\s*:\s*\{[\s\S]{0,120}?"token"\s*:\s*"([^"]+)"/)?.[1] ??
+    html.match(/"dtsg"\s*:\s*\{\s*"value"\s*:\s*"([^"]+)"/)?.[1] ??
     html.match(/"fb_dtsg"\s*:\s*"([^"]+)"/)?.[1] ??
     html.match(/"dtsg_token"\s*:\s*"([^"]+)"/)?.[1] ??
     html.match(/"async_get_token":"([^"]+)"/)?.[1] ??
