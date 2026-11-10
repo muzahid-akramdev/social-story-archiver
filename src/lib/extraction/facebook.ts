@@ -1055,6 +1055,37 @@ async function fetchFbDtsg(
 }
 
 /**
+ * Structure census of an authenticated profile page, for diagnosing
+ * where (if anywhere) the current story bucket id is embedded. Reports
+ * JSON key NAMES containing "bucket"/"stor" with occurrence counts,
+ * and up to 3 long numeric ids appearing within 120 chars after such a
+ * key. Never reports values, tokens or media URLs.
+ */
+function profilePageCensus(norm: string, ownerId: string): string {
+  const keyCounts = new Map<string, number>();
+  for (const m of norm.matchAll(
+    /"([A-Za-z0-9_]{0,40}?(?:bucket|stor)[A-Za-z0-9_]{0,40}?)"\s*:/gi
+  )) {
+    const k = m[1];
+    keyCounts.set(k, (keyCounts.get(k) ?? 0) + 1);
+  }
+  const keys = [...keyCounts.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 10)
+    .map(([k, n]) => `${k}×${n}`)
+    .join("+");
+  const nearIds: string[] = [];
+  for (const m of norm.matchAll(/(?:bucket|stor)[\s\S]{0,120}?"?(\d{12,})"?/gi)) {
+    if (!nearIds.includes(m[1])) nearIds.push(m[1]);
+    if (nearIds.length >= 3) break;
+  }
+  return (
+    `census{ownerOnPage=${norm.includes(ownerId)}, ` +
+    `keys=${keys || "none"}, nearStoryIds=${nearIds.join("+") || "none"}}`
+  );
+}
+
+/**
  * Discover a profile's CURRENT story bucket id from the profile page's
  * session SSR: profile_header_renderer embeds user.story_bucket.nodes[]
  * (bucket id + first story). Query-only GET; no player, no seen call.
@@ -1126,7 +1157,17 @@ async function discoverStoryBucketId(
       norm.match(/\/stories\/(\d{6,})\//)?.[1] ??
       null;
     if (bucketId) return { bucketId, error: null, sessionInvalid: false };
-    outcomes.push(`${host}: authenticated page, no bucket found`);
+    // Diagnostic census of the FIRST authenticated profile page (key
+    // names + candidate ids near story/bucket keys only — no values,
+    // no tokens): shows where a bucket id could hide in this layout.
+    if (!outcomes.some((o) => o.includes("census{"))) {
+      outcomes.push(
+        `${host}: authenticated page, no bucket found, ` +
+          profilePageCensus(norm, ownerId)
+      );
+    } else {
+      outcomes.push(`${host}: authenticated page, no bucket found`);
+    }
   }
   return {
     bucketId: null,
