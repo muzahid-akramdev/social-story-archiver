@@ -1025,6 +1025,7 @@ async function fetchViaSessionGraphql(args: {
     isStoriesArchive: false,
     __relay_internal__pv__IsWorkUserrelayprovider: false,
   };
+  const bootFieldNames = Object.keys(dtsg.fields).sort().join("+");
   const body = new URLSearchParams({
     av: uid,
     __aaid: "0",
@@ -1056,6 +1057,11 @@ async function fetchViaSessionGraphql(args: {
         "Accept-Language": "en-US,en;q=0.9",
         "Content-Type": "application/x-www-form-urlencoded",
         "X-Fb-Friendly-Name": STORIES_BUCKET_QUERY_NAME,
+        // Comet sends the LSD as a header as well as a form field.
+        ...(dtsg.fields.lsd ? { "X-Fb-Lsd": dtsg.fields.lsd } : {}),
+        "Sec-Fetch-Site": "same-origin",
+        "Sec-Fetch-Mode": "cors",
+        "Sec-Fetch-Dest": "empty",
         Origin: "https://www.facebook.com",
         Referer: "https://www.facebook.com/",
         Cookie: cookie,
@@ -1125,6 +1131,7 @@ async function fetchViaSessionGraphql(args: {
   // Shape census (counts and key presence only — never URLs or media
   // content): makes the next diagnosis decisive instead of speculative.
   const census = [
+    `bootFields=${bootFieldNames || "none"}`,
     `bytes=${text.length}`,
     `bucketIdInResponse=${text.includes(bucketId)}`,
     args.storyId ? `storyIdInResponse=${text.includes(args.storyId)}` : null,
