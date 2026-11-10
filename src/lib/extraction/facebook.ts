@@ -846,15 +846,52 @@ type SessionProbe =
 
 /** Mine an fb_dtsg token out of any authenticated page's payload. */
 function extractDtsgToken(html: string): string | null {
-  return (
+  const direct =
     html.match(/"DTSGInitialData",\[\],\{"token":"([^"]+)"/)?.[1] ??
     html.match(/"DTSGInitialData"[\s\S]{0,300}?"token":"([^"]+)"/)?.[1] ??
+    html.match(/"DTSGInitData",\[\],\{"token":"([^"]+)"/)?.[1] ??
     html.match(/"dtsg"\s*:\s*\{\s*"token"\s*:\s*"([^"]+)"/)?.[1] ??
+    html.match(/"fb_dtsg"\s*:\s*"([^"]+)"/)?.[1] ??
+    html.match(/"dtsg_token"\s*:\s*"([^"]+)"/)?.[1] ??
     html.match(/"async_get_token":"([^"]+)"/)?.[1] ??
     html.match(/name="fb_dtsg"\s+value="([^"]+)"/)?.[1] ??
     html.match(/value="([^"]+)"\s+name="fb_dtsg"/)?.[1] ??
-    null
-  );
+    html.match(/name=\\"fb_dtsg\\"\s+value=\\"([^"\\]+)\\"/)?.[1] ??
+    null;
+  if (direct) return direct;
+  // Window fallback: the first "token" value shortly after any DTSG
+  // mention — the mobile (m/touch) boot payloads served from some
+  // egress networks carry LSD yet name the dtsg structure differently
+  // (verified live 2026-11-10 via the Cloudflare Worker egress:
+  // ~48 KB authenticated pages, uid + lsd present, no classic keys).
+  const idx = html.search(/DTSG/i);
+  if (idx >= 0) {
+    const win = html.slice(idx, idx + 600);
+    return win.match(/"token"\s*:\s*"([^"]+)"/)?.[1] ?? null;
+  }
+  return null;
+}
+
+/**
+ * Key census of a page's boot region: the most frequent JSON key
+ * names in the first 64 KB plus any key mentioning dtsg/token/async.
+ * Key NAMES only — never values — so it can ride in diagnostics.
+ */
+function bootKeyCensus(html: string): string {
+  const sample = html.slice(0, 65_536);
+  const counts = new Map<string, number>();
+  for (const m of sample.matchAll(/"([A-Za-z_][A-Za-z0-9_]{2,40})"\s*:/g)) {
+    counts.set(m[1], (counts.get(m[1]) ?? 0) + 1);
+  }
+  const top = [...counts.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 36)
+    .map(([k, c]) => `${k}:${c}`)
+    .join(" ");
+  const dtsgKeys =
+    [...counts.keys()].filter((k) => /dtsg|token|async/i.test(k)).join("|") ||
+    "none";
+  return `keys=[${top}] dtsgKeys=${dtsgKeys}`;
 }
 
 type CometBootstrap = {
@@ -941,6 +978,7 @@ async function fetchFbDtsg(
   const uid = cookieValue(cookie, "c_user");
   let sawInvalid = 0;
   let sawOk = 0;
+  let keyCensusDone = false;
   const outcomes: string[] = [];
   for (const candidate of candidates) {
     const host = new URL(candidate.url).hostname;
@@ -976,14 +1014,20 @@ async function fetchFbDtsg(
     // Marker census for the tokenless page (presence/byte counts
     // only — never values): distinguishes "cookie not honoured"
     // (own uid absent) from "page variant carries no token at all".
+    const hasLsd = html.includes('"LSD"') || html.includes('"lsd"');
     const markers = [
       `bytes=${html.length}`,
       `uid=${uid ? html.includes(uid) : false}`,
       `dtsgData=${html.includes("DTSGInitialData")}`,
       `dtsgInput=${html.includes('name="fb_dtsg"')}`,
-      `lsd=${html.includes('"LSD"') || html.includes('"lsd"')}`,
+      `lsd=${hasLsd}`,
     ].join(",");
-    outcomes.push(`${host}: authenticated, no token (${markers})`);
+    let outcome = `${host}: authenticated, no token (${markers})`;
+    if (hasLsd && !keyCensusDone) {
+      keyCensusDone = true;
+      outcome += ` ${bootKeyCensus(html)}`;
+    }
+    outcomes.push(outcome);
   }
   if (sawOk === 0 && sawInvalid > 0) {
     return {
