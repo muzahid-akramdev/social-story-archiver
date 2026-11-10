@@ -19,6 +19,96 @@ const IPHONE_USER_AGENT =
   "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 " +
   "Mobile/15E148 Safari/604.1";
 
+/* ------------------------------------------------------------------ */
+/* Egress routing for dedicated-session fetches (added 2026-11-10).    */
+/*                                                                     */
+/* From Vercel's datacenter IPs, the dedicated session's GraphQL POST  */
+/* draws Facebook's generic gateway refusal (error 1357004, 249        */
+/* bytes) despite a valid session, a fresh fb_dtsg and the full        */
+/* Comet boot field set — while page GETs from the same IPs are        */
+/* served. When FB_EGRESS_PROXY_URL + FB_EGRESS_PROXY_SECRET are       */
+/* set, every dedicated-session fetch below (dtsg bootstrap, bucket    */
+/* discovery, stories SSR legs, the GraphQL POST) is tunnelled         */
+/* through the fb-egress Cloudflare Worker (worker/fb-egress-          */
+/* worker.js), so the facebook.com request leaves from Cloudflare's    */
+/* network instead. The Worker is a secret-gated, host-allowlisted     */
+/* pipe: same method/headers/body out, raw body + upstream status +    */
+/* final URL back. Nothing about the never-seen guard changes — the    */
+/* requests themselves are identical, only their egress differs.       */
+/* When the env vars are unset, sessionFetch is a plain direct         */
+/* fetch and behaviour is exactly as before.                           */
+/* ------------------------------------------------------------------ */
+
+type SessionFetchInit = {
+  method?: string;
+  headers: Record<string, string>;
+  body?: string;
+  signal?: AbortSignal;
+};
+
+type SessionFetchResult = {
+  ok: boolean;
+  status: number;
+  url: string;
+  text: () => Promise<string>;
+};
+
+function egressProxyConfig(): { url: string; secret: string } | null {
+  const url = process.env.FB_EGRESS_PROXY_URL?.trim();
+  const secret = process.env.FB_EGRESS_PROXY_SECRET?.trim();
+  return url && secret ? { url, secret } : null;
+}
+
+async function sessionFetch(
+  url: string,
+  init: SessionFetchInit
+): Promise<SessionFetchResult> {
+  const proxy = egressProxyConfig();
+  if (!proxy) {
+    const res = await fetch(url, {
+      method: init.method ?? "GET",
+      headers: init.headers,
+      body: init.body,
+      redirect: "follow",
+      signal: init.signal,
+    });
+    const bodyText = await res.text();
+    return {
+      ok: res.ok,
+      status: res.status,
+      url: res.url,
+      text: async () => bodyText,
+    };
+  }
+  const proxyRes = await fetch(proxy.url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Egress-Secret": proxy.secret,
+    },
+    body: JSON.stringify({
+      url,
+      method: init.method ?? "GET",
+      headers: init.headers,
+      body: init.body ?? null,
+    }),
+    signal: init.signal,
+  });
+  const bodyText = await proxyRes.text();
+  if (!proxyRes.ok) {
+    throw new Error(`egress proxy answered HTTP ${proxyRes.status}`);
+  }
+  const upstreamStatus = Number(
+    proxyRes.headers.get("x-egress-upstream-status") ?? proxyRes.status
+  );
+  return {
+    ok: upstreamStatus >= 200 && upstreamStatus < 300,
+    status: upstreamStatus,
+    url: proxyRes.headers.get("x-egress-final-url") ?? url,
+    text: async () => bodyText,
+  };
+}
+
 /**
  * Facebook media extraction — strategy order (spec §5, revised
  * 2026-11-10). The design goal is to retrieve media WITHOUT registering
@@ -623,13 +713,12 @@ async function fetchViaSessionSsr(args: {
   let leg1FetchError: string | null = null;
   for (const variantUrl of hostVariants) {
     try {
-      const res = await fetch(variantUrl, {
+      const res = await sessionFetch(variantUrl, {
         headers: {
           "User-Agent": USER_AGENT,
           "Accept-Language": "en-US,en;q=0.9",
           Cookie: cookie,
         },
-        redirect: "follow",
         signal: AbortSignal.timeout(SESSION_SSR_TIMEOUT_MS),
       });
       const html = await res.text();
@@ -659,13 +748,12 @@ async function fetchViaSessionSsr(args: {
   // Leg 2: story.php WITH the session, parsed the same way.
   if (storyPhpUrl) {
     try {
-      const res = await fetch(storyPhpUrl, {
+      const res = await sessionFetch(storyPhpUrl, {
         headers: {
           "User-Agent": USER_AGENT,
           "Accept-Language": "en-US,en;q=0.9",
           Cookie: cookie,
         },
-        redirect: "follow",
         signal: AbortSignal.timeout(SESSION_SSR_TIMEOUT_MS),
       });
       const html = await res.text();
@@ -849,13 +937,12 @@ async function fetchFbDtsg(
     let html: string;
     let finalUrl: string;
     try {
-      const res = await fetch(candidate.url, {
+      const res = await sessionFetch(candidate.url, {
         headers: {
           "User-Agent": candidate.ua,
           "Accept-Language": "en-US,en;q=0.9",
           Cookie: cookie,
         },
-        redirect: "follow",
         signal: AbortSignal.timeout(GRAPHQL_TIMEOUT_MS),
       });
       finalUrl = res.url;
@@ -927,13 +1014,12 @@ async function discoverStoryBucketId(
     let html: string;
     let finalUrl: string;
     try {
-      const res = await fetch(variant.url, {
+      const res = await sessionFetch(variant.url, {
         headers: {
           "User-Agent": variant.ua,
           "Accept-Language": "en-US,en;q=0.9",
           Cookie: cookie,
         },
-        redirect: "follow",
         signal: AbortSignal.timeout(GRAPHQL_TIMEOUT_MS),
       });
       finalUrl = res.url;
@@ -1050,7 +1136,7 @@ async function fetchViaSessionGraphql(args: {
 
   let text: string;
   try {
-    const res = await fetch("https://www.facebook.com/api/graphql/", {
+    const res = await sessionFetch("https://www.facebook.com/api/graphql/", {
       method: "POST",
       headers: {
         "User-Agent": USER_AGENT,
@@ -1067,7 +1153,6 @@ async function fetchViaSessionGraphql(args: {
         Cookie: cookie,
       },
       body: body.toString(),
-      redirect: "follow",
       signal: AbortSignal.timeout(GRAPHQL_TIMEOUT_MS),
     });
     text = await res.text();
@@ -1131,6 +1216,7 @@ async function fetchViaSessionGraphql(args: {
   // Shape census (counts and key presence only — never URLs or media
   // content): makes the next diagnosis decisive instead of speculative.
   const census = [
+    `egress=${egressProxyConfig() ? "worker" : "direct"}`,
     `bootFields=${bootFieldNames || "none"}`,
     `bytes=${text.length}`,
     `bucketIdInResponse=${text.includes(bucketId)}`,
