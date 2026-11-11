@@ -184,6 +184,36 @@ export async function syncExtractedMedia(
           }
           throw insertError;
         }
+
+        // Keep the poster image alongside the video (user direction,
+        // 2026-11-12): compressed like a photo (≤40 KB WebP) at the
+        // thumbs convention path the gallery derives for video covers.
+        // A poster failure never fails the video archive itself.
+        if (item.posterUrl) {
+          try {
+            const pres = await fetch(item.posterUrl, {
+              headers: {
+                "User-Agent":
+                  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+                Referer: "https://www.facebook.com/",
+                "Accept-Language": "en-US,en;q=0.9",
+              },
+            });
+            if (pres.ok) {
+              const pbytes = await pres.arrayBuffer();
+              const pcomp = await compressImageToTarget(pbytes);
+              await db.storage
+                .from(BUCKET)
+                .upload(
+                  `${link.user_id}/${link.id}/thumbs/${storyId}.webp`,
+                  pcomp.buffer,
+                  { contentType: "image/webp", upsert: true }
+                );
+            }
+          } catch (perr) {
+            console.warn(`poster for link ${link.id} failed:`, perr);
+          }
+        }
       }
 
       outcome.newStories++;

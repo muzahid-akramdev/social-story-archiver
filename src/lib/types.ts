@@ -83,6 +83,9 @@ export type MediaItem = {
   // but only its poster image URL was extractable from the response that
   // produced this item — callers may try to upgrade it to the real video
   // via another leg before archiving (added 2026-11-12)
+  posterUrl?: string; // for video items: the story's poster image URL,
+  // kept alongside the video so the archive holds both (user direction,
+  // 2026-11-12). Stored compressed at the thumbs-path convention.
 };
 
 /**

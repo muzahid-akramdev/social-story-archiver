@@ -80,6 +80,23 @@ export async function POST(req: NextRequest) {
       name: datePrefix ? `${datePrefix}_${base}` : base,
       buffer: Buffer.from(await blob.arrayBuffer()),
     });
+    // A video's poster image rides along in the ZIP when one is stored
+    // (thumbs convention path — see storage.ts).
+    if (story.media_type === "video") {
+      const dir = story.storage_path.split("/").slice(0, -1).join("/");
+      const stem = base.replace(/\.[^.]+$/, "");
+      const { data: poster } = await db.storage
+        .from(BUCKET)
+        .download(`${dir}/thumbs/${stem}.webp`);
+      if (poster) {
+        entries.push({
+          name: datePrefix
+            ? `${datePrefix}_${stem}-poster.webp`
+            : `${stem}-poster.webp`,
+          buffer: Buffer.from(await poster.arrayBuffer()),
+        });
+      }
+    }
   }
   if (entries.length === 0) {
     return NextResponse.json(

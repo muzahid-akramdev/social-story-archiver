@@ -373,7 +373,12 @@ export async function fetchAndParseFacebookMedia(
               const idx = viaGql.items.findIndex(
                 (i) => i.posterOfVideo && i.sourceId === v.sourceId
               );
-              if (idx >= 0) viaGql.items[idx] = v;
+              if (idx >= 0) {
+                // The replaced item's URL is the poster — keep it
+                // alongside the video.
+                if (!v.posterUrl) v.posterUrl = viaGql.items[idx].mediaUrl;
+                viaGql.items[idx] = v;
+              }
             }
           }
         }
@@ -1343,6 +1348,8 @@ async function fetchViaSessionGraphql(args: {
         (s) => s.mediaType === "video" && s.sourceId === item.sourceId
       ) ?? scanned.find((s) => s.mediaType === "video");
     if (vid) {
+      // The item's current URL is the poster — keep it as the poster.
+      if (!item.posterUrl) item.posterUrl = item.mediaUrl;
       item.mediaUrl = vid.mediaUrl;
       item.mediaType = "video";
       item.posterOfVideo = undefined;
@@ -1470,6 +1477,8 @@ type CardMedia = {
   url: string;
   /** The card is a video but only its poster image could be extracted. */
   videoReducedToPoster?: boolean;
+  /** For video cards: the poster image URL, when the response has one. */
+  posterUrl?: string;
 };
 
 /** True for a URL that points at a video file (video CDN host or .mp4). */
@@ -1525,9 +1534,27 @@ function mediaFromStoryCard(node: Record<string, unknown>): CardMedia | null {
       sawVideoMedia = true;
     }
 
+    // This media's poster candidate (also the photo, for photo cards):
+    // captured BEFORE the video returns so a found video keeps it.
+    const imageObj = media.image as { uri?: string } | undefined;
+    const uri = imageObj?.uri;
+    const posterHere =
+      typeof uri === "string" &&
+      uri &&
+      !uri.includes("t39.30808-1") &&
+      !uri.includes("t39.1997-6")
+        ? uri
+        : null;
+    const posterSoFar = posterHere ?? image?.url ?? undefined;
+    const asVideo = (url: string): CardMedia => ({
+      kind: "video",
+      url,
+      posterUrl: posterSoFar,
+    });
+
     const playable = media.playable_url;
     if (typeof playable === "string" && playable) {
-      return { kind: "video", url: playable };
+      return asVideo(playable);
     }
     const frag = media.videoDeliveryResponseFragment as
       | Record<string, unknown>
@@ -1546,23 +1573,18 @@ function mediaFromStoryCard(node: Record<string, unknown>): CardMedia | null {
         progressive.find((p) => p.metadata?.quality === "HD") ??
         progressive[0];
       if (hd?.progressive_url) {
-        return { kind: "video", url: hd.progressive_url };
+        return asVideo(hd.progressive_url);
       }
     }
     for (const key of ["browser_native_hd_url", "browser_native_sd_url"]) {
       const u = media[key];
-      if (typeof u === "string" && u) return { kind: "video", url: u };
+      if (typeof u === "string" && u) return asVideo(u);
     }
     const deep = findVideoUrlDeep(media, 0);
-    if (deep) return { kind: "video", url: deep };
+    if (deep) return asVideo(deep);
 
-    const imageObj = media.image as { uri?: string } | undefined;
-    const uri = imageObj?.uri;
-    if (typeof uri === "string" && uri && !image) {
-      // Avatar-class and sticker-class renditions are never the photo.
-      if (!uri.includes("t39.30808-1") && !uri.includes("t39.1997-6")) {
-        image = { kind: "image", url: uri };
-      }
+    if (posterHere && !image) {
+      image = { kind: "image", url: posterHere };
     }
   }
   if (image && sawVideoMedia) {
@@ -1613,6 +1635,7 @@ export function parseGraphqlBucketMedia(text: string): MediaItem[] {
             mediaUrl: media.url,
             mediaType: media.kind,
             sourceId: cardId,
+            posterUrl: media.kind === "video" ? media.posterUrl : undefined,
             posterOfVideo: media.videoReducedToPoster || undefined,
             note: media.videoReducedToPoster
               ? "Video story card: the bucket query response carried only the poster image, no playable URL — upgrade to the real video is attempted by the caller."

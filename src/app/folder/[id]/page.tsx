@@ -63,11 +63,29 @@ export default async function FolderPage({ params }: { params: { id: string } })
       const { data: signed } = await db.storage
         .from(BUCKET)
         .createSignedUrl(story.storage_path, SIGNED_URL_TTL_SECONDS);
+      // Video stories keep a poster image at the thumbs convention
+      // path (see storage.ts) — sign it as the gallery cover.
+      let posterUrl: string | undefined;
+      if (story.media_type === "video") {
+        const dir = story.storage_path.split("/").slice(0, -1).join("/");
+        const stem = (story.storage_path.split("/").pop() ?? "").replace(
+          /\.[^.]+$/,
+          ""
+        );
+        const { data: posterSigned } = await db.storage
+          .from(BUCKET)
+          .createSignedUrl(
+            `${dir}/thumbs/${stem}.webp`,
+            SIGNED_URL_TTL_SECONDS
+          );
+        posterUrl = posterSigned?.signedUrl ?? undefined;
+      }
       return {
         id: story.id,
         mediaType: story.media_type,
         url: signed?.signedUrl ?? "",
         archivedAt: story.archived_at,
+        posterUrl,
       };
     })
   );

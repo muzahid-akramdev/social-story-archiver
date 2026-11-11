@@ -7,6 +7,7 @@ export type GalleryItem = {
   mediaType: "image" | "video";
   url: string; // signed URL, generated server-side
   archivedAt: string;
+  posterUrl?: string; // video stories: signed URL of the kept poster image
 };
 
 const ROTATIONS = ["-rotate-2.5", "-rotate-1.5", "rotate-1", "rotate-1.5", "rotate-2.5"];
@@ -31,11 +32,16 @@ export default function StoryGrid({ items }: { items: GalleryItem[] }) {
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
+  const [removedIds, setRemovedIds] = useState<Set<string>>(new Set());
+  const [confirmBulkDelete, setConfirmBulkDelete] = useState(false);
+  const [confirmSingleDelete, setConfirmSingleDelete] = useState(false);
+  const [deleting, setDeleting] = useState(false);
 
   const filtered = useMemo(() => {
     const from = fromDate ? new Date(`${fromDate}T00:00:00`) : null;
     const to = toDate ? new Date(`${toDate}T23:59:59`) : null;
     const out = items.filter((i) => {
+      if (removedIds.has(i.id)) return false;
       if (typeFilter !== "all" && i.mediaType !== typeFilter) return false;
       const d = new Date(i.archivedAt);
       if (from && d < from) return false;
@@ -48,7 +54,7 @@ export default function StoryGrid({ items }: { items: GalleryItem[] }) {
         : a.archivedAt.localeCompare(b.archivedAt)
     );
     return out;
-  }, [items, typeFilter, fromDate, toDate, sort]);
+  }, [items, typeFilter, fromDate, toDate, sort, removedIds]);
 
   const toggleSelected = (id: string) => {
     setSelected((prev) => {
@@ -62,6 +68,33 @@ export default function StoryGrid({ items }: { items: GalleryItem[] }) {
   const selectAllShown = () =>
     setSelected(new Set(filtered.map((i) => i.id)));
   const clearSelection = () => setSelected(new Set());
+
+  async function deleteStories(ids: string[]) {
+    if (ids.length === 0 || deleting) return;
+    setDeleting(true);
+    setStatus(null);
+    try {
+      const res = await fetch("/api/stories", {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ storyIds: ids }),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      setRemovedIds((prev) => new Set([...prev, ...ids]));
+      setSelected((prev) => {
+        const next = new Set(prev);
+        for (const id of ids) next.delete(id);
+        return next;
+      });
+      setOpenIndex(null);
+      setConfirmBulkDelete(false);
+      setConfirmSingleDelete(false);
+    } catch {
+      setStatus("Delete failed — please try again.");
+    } finally {
+      setDeleting(false);
+    }
+  }
 
   async function downloadZip(ids: string[]) {
     if (ids.length === 0 || busy) return;
@@ -103,6 +136,8 @@ export default function StoryGrid({ items }: { items: GalleryItem[] }) {
     "bg-darkroom border border-paper/20 rounded px-2 py-1.5 text-sm text-paper";
   const btnCls =
     "font-mono text-xs uppercase tracking-wide border border-paper/25 rounded px-3 py-2 text-paper/80 hover:border-amber hover:text-amber disabled:opacity-40 disabled:hover:border-paper/25 disabled:hover:text-paper/80";
+  const dangerBtnCls =
+    "font-mono text-xs uppercase tracking-wide border border-red-400/50 rounded px-3 py-2 text-red-300 hover:border-red-400 hover:text-red-200 disabled:opacity-40";
 
   return (
     <>
@@ -193,6 +228,37 @@ export default function StoryGrid({ items }: { items: GalleryItem[] }) {
           >
             Download all shown as ZIP
           </button>
+          {!confirmBulkDelete ? (
+            <button
+              type="button"
+              onClick={() => setConfirmBulkDelete(true)}
+              disabled={selected.size === 0 || deleting}
+              className={dangerBtnCls}
+            >
+              Delete selected ({selected.size})
+            </button>
+          ) : (
+            <>
+              <button
+                type="button"
+                onClick={() => deleteStories([...selected])}
+                disabled={deleting}
+                className={dangerBtnCls}
+              >
+                {deleting
+                  ? "Deleting…"
+                  : `Confirm delete (${selected.size})?`}
+              </button>
+              <button
+                type="button"
+                onClick={() => setConfirmBulkDelete(false)}
+                disabled={deleting}
+                className={btnCls}
+              >
+                Cancel
+              </button>
+            </>
+          )}
           {status && <span className="text-sm text-amber">{status}</span>}
         </div>
       </div>
@@ -208,7 +274,7 @@ export default function StoryGrid({ items }: { items: GalleryItem[] }) {
             return (
               <div key={item.id} className="relative">
                 <button
-                  onClick={() => setOpenIndex(i)}
+                  onClick={() => { setOpenIndex(i); setConfirmSingleDelete(false); }}
                   className={`film-frame ${ROTATIONS[i % ROTATIONS.length]} hover:rotate-0 text-left w-full ${
                     isSel ? "ring-2 ring-amber" : ""
                   }`}
@@ -222,6 +288,7 @@ export default function StoryGrid({ items }: { items: GalleryItem[] }) {
                   ) : (
                     <video
                       src={item.url}
+                      poster={item.posterUrl}
                       className="w-full aspect-[9/16] object-cover"
                       muted
                     />
@@ -252,7 +319,7 @@ export default function StoryGrid({ items }: { items: GalleryItem[] }) {
       {openIndex !== null && filtered[openIndex] && (
         <div
           className="fixed inset-0 bg-darkroom/95 flex items-center justify-center p-6 z-50"
-          onClick={() => setOpenIndex(null)}
+          onClick={() => { setOpenIndex(null); setConfirmSingleDelete(false); }}
         >
           <div className="max-w-md w-full" onClick={(e) => e.stopPropagation()}>
             {filtered[openIndex].mediaType === "image" ? (
@@ -264,6 +331,7 @@ export default function StoryGrid({ items }: { items: GalleryItem[] }) {
             ) : (
               <video
                 src={filtered[openIndex].url}
+                poster={filtered[openIndex].posterUrl}
                 className="w-full rounded shadow-2xl"
                 controls
                 autoPlay
@@ -286,9 +354,38 @@ export default function StoryGrid({ items }: { items: GalleryItem[] }) {
                 >
                   {busy ? "Preparing…" : "Download as ZIP"}
                 </button>
+                {!confirmSingleDelete ? (
+                  <button
+                    type="button"
+                    onClick={() => setConfirmSingleDelete(true)}
+                    disabled={deleting}
+                    className="font-mono text-xs uppercase tracking-wide text-red-300 disabled:opacity-40"
+                  >
+                    Delete
+                  </button>
+                ) : (
+                  <>
+                    <button
+                      type="button"
+                      onClick={() => deleteStories([filtered[openIndex].id])}
+                      disabled={deleting}
+                      className="font-mono text-xs uppercase tracking-wide text-red-300 disabled:opacity-40"
+                    >
+                      {deleting ? "Deleting…" : "Confirm delete?"}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setConfirmSingleDelete(false)}
+                      disabled={deleting}
+                      className="font-mono text-xs uppercase tracking-wide text-paper/60"
+                    >
+                      Cancel
+                    </button>
+                  </>
+                )}
               </div>
               <button
-                onClick={() => setOpenIndex(null)}
+                onClick={() => { setOpenIndex(null); setConfirmSingleDelete(false); }}
                 className="font-mono text-xs uppercase tracking-wide text-paper/60"
               >
                 Close
