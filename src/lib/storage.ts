@@ -3,9 +3,7 @@ import { contentHashFromBytes, contentHashFromSourceId } from "@/lib/hash";
 import {
   compressImageToTarget,
   makeThumbnail,
-  bundleZip,
   archiveZipName,
-  ZipEntry,
 } from "@/lib/media/pipeline";
 import { MediaItem, WatchedLink } from "@/lib/types";
 
@@ -17,7 +15,8 @@ export type SyncOutcome = {
   failed: number;
   /** Per-item failure reasons (media type + host + message; never a full signed URL). */
   errors: string[];
-  /** Set when this sync produced a ZIP archive (images were bundled). */
+  /** Legacy fields: crawls no longer bundle ZIPs (see header), so
+   * these stay null/0 — kept so existing callers keep compiling. */
   archiveId: string | null;
   zipPath: string | null;
   zipSizeBytes: number;
@@ -39,13 +38,14 @@ export type SyncContext = {
  *
  * New IMAGES go through the ≤40 KB adaptive WebP pipeline
  * (src/lib/media/pipeline.ts): the compressed file is stored
- * individually (gallery), a 240px thumbnail beside it, and all of this
- * crawl's new images are bundled into ONE ZIP uploaded to
- * {user_id}/{link_id}/{YYYY-MM-DD}/{crawl_id}.zip with an `archives`
- * row recording it (spec storage layout).
+ * individually (gallery), a 240px thumbnail beside it. Videos are
+ * stored as the original MP4, individually.
  *
- * Videos are stored as the original MP4, individually and in the ZIP
- * (no recompression — no ffmpeg pipeline here).
+ * Storage form is the native file itself (user direction, 2026-11-12):
+ * crawls no longer bundle a per-crawl ZIP. ZIPs are produced on demand
+ * at download time (POST /api/stories/download-zip) for any selection
+ * of stories. `archives` rows from earlier crawls remain downloadable
+ * from the folder page.
  */
 export async function syncExtractedMedia(
   link: WatchedLink,
@@ -63,7 +63,6 @@ export async function syncExtractedMedia(
     zipSizeBytes: 0,
   };
 
-  const zipEntries: ZipEntry[] = [];
   const seenRows: {
     fb_story_id: string;
     expires_at: string | null;
@@ -120,8 +119,7 @@ export async function syncExtractedMedia(
       const storyId = crypto.randomUUID();
 
       if (item.mediaType === "image") {
-        // Compress to ≤40 KB, store individually + thumbnail, and hold
-        // the compressed bytes for this crawl's ZIP bundle.
+        // Compress to ≤40 KB, store individually + thumbnail.
         const compressed = await compressImageToTarget(bytes);
         if (compressed.bytes > 40 * 1024) {
           console.warn(
@@ -162,15 +160,9 @@ export async function syncExtractedMedia(
           throw insertError;
         }
 
-        zipEntries.push({
-          name: `${storyId}.webp`,
-          buffer: compressed.buffer,
-        });
       } else {
-        // Video: store the original individually AND include it in this
-        // crawl's ZIP bundle (since 2026-11-12 — previously videos were
-        // stored but never zipped, so the downloadable archive held
-        // only images). No recompression: no ffmpeg pipeline here.
+        // Video: store the original MP4 individually. No
+        // recompression: no ffmpeg pipeline here.
         const path = `${link.user_id}/${link.id}/${storyId}.mp4`;
         const { error: uploadError } = await db.storage
           .from(BUCKET)
@@ -192,11 +184,6 @@ export async function syncExtractedMedia(
           }
           throw insertError;
         }
-
-        zipEntries.push({
-          name: `${storyId}.mp4`,
-          buffer: Buffer.from(bytes),
-        });
       }
 
       outcome.newStories++;
@@ -218,61 +205,10 @@ export async function syncExtractedMedia(
     }
   }
 
-  // Bundle this crawl's new images into one ZIP + archives row.
-  if (zipEntries.length > 0) {
-    try {
-      const zip = await bundleZip(zipEntries);
-      const now = new Date();
-      const dateDir = now.toISOString().slice(0, 10);
-      const zipPath =
-        `${link.user_id}/${link.id}/${dateDir}/${ctx.crawlId}.zip`;
-
-      const { error: zipError } = await db.storage
-        .from(BUCKET)
-        .upload(zipPath, zip, {
-          contentType: "application/zip",
-          upsert: false,
-        });
-      if (zipError) throw zipError;
-
-      const { data: archive, error: archiveError } = await db
-        .from("archives")
-        .insert({
-          user_id: link.user_id,
-          watched_link_id: link.id,
-          crawl_id: ctx.crawlId,
-          zip_path: zipPath,
-          zip_size_bytes: zip.length,
-          story_count: zipEntries.length,
-        })
-        .select()
-        .single();
-      if (archiveError) throw archiveError;
-
-      outcome.archiveId = archive.id;
-      outcome.zipPath = zipPath;
-      outcome.zipSizeBytes = zip.length;
-
-      // Point this crawl's stories_seen rows at the archive they live in.
-      if (seenRows.length > 0) {
-        await db.from("stories_seen").upsert(
-          seenRows.map((r) => ({
-            user_id: link.user_id,
-            watched_link_id: link.id,
-            fb_story_id: r.fb_story_id,
-            expires_at: r.expires_at,
-            archive_id: archive.id,
-          })),
-          { onConflict: "watched_link_id,fb_story_id" }
-        );
-      }
-    } catch (err) {
-      // The individual stories are already stored; a failed bundle is
-      // logged, not fatal to the crawl.
-      console.error("archive ZIP bundling failed:", err);
-    }
-  } else if (seenRows.length > 0) {
-    // Videos only (or images whose ZIP failed): still record the ledger.
+  // Record the dedupe ledger for this crawl's new stories. No ZIP is
+  // bundled at crawl time — native files are the storage form, and
+  // ZIPs are generated on demand at download time.
+  if (seenRows.length > 0) {
     await db.from("stories_seen").upsert(
       seenRows.map((r) => ({
         user_id: link.user_id,

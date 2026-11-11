@@ -96,7 +96,9 @@ export default async function FolderPage({ params }: { params: { id: string } })
       {archiveItems.length > 0 && (
         <section className="mb-14">
           <h2 className="font-mono text-xs uppercase tracking-widest text-paper/50 mb-4">
-            ZIP archives — one per crawl with new stories
+            ZIP archives from earlier crawls — new stories are kept as
+            individual files below; bundle any selection into a ZIP from
+            there
           </h2>
           <ul className="space-y-2">
             {archiveItems.map((a) => (
