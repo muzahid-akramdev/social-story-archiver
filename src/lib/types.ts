@@ -79,6 +79,10 @@ export type MediaItem = {
   note?: string; // free-text caveat about what was actually served, e.g.
   // the storyphp-og strategy's OG preview rendition being a ≤600×600
   // square crop rather than the full-size original
+  posterOfVideo?: boolean; // true when the source story card IS a video
+  // but only its poster image URL was extractable from the response that
+  // produced this item — callers may try to upgrade it to the real video
+  // via another leg before archiving (added 2026-11-12)
 };
 
 /**

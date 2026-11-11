@@ -349,7 +349,36 @@ export async function fetchAndParseFacebookMedia(
             : []),
         ],
       });
-      if (viaGql.ok) return viaGql;
+      if (viaGql.ok) {
+        // Video cards reduced to their poster by the bucket query: try
+        // ONE upgrade pass through the stories-page SSR leg (its parser
+        // hunts playable_url forms the prefetcher response omits)
+        // before settling for the poster image. Photo items and the
+        // success path are otherwise untouched.
+        const posterItems = viaGql.items.filter((i) => i.posterOfVideo);
+        if (posterItems.length > 0 && storyId && gqlBucketId) {
+          const upgrade = await fetchViaSessionSsr({
+            pageUrl: buildStoriesPageUrl(gqlBucketId, storyId),
+            storyId,
+            bucketId: gqlBucketId,
+            storyPhpUrl:
+              storyId && ownerId
+                ? `https://www.facebook.com/story.php?story_fbid=${encodeURIComponent(storyId)}&id=${encodeURIComponent(ownerId)}`
+                : null,
+            cookie: sessionCookie,
+          });
+          if (upgrade.ok) {
+            for (const v of upgrade.items) {
+              if (v.mediaType !== "video") continue;
+              const idx = viaGql.items.findIndex(
+                (i) => i.posterOfVideo && i.sourceId === v.sourceId
+              );
+              if (idx >= 0) viaGql.items[idx] = v;
+            }
+          }
+        }
+        return viaGql;
+      }
       notes.push(`session-graphql failed: ${viaGql.error}`);
       if (viaGql.sessionInvalid) sessionInvalid = true;
     } else if (!gqlBucketId && !ownerId) {
@@ -1302,6 +1331,25 @@ async function fetchViaSessionGraphql(args: {
   }
 
   const items = parseGraphqlBucketMedia(text);
+  // Video cards the structured parse could only reduce to their poster:
+  // give the raw-text window scan (keyed on each card's story id) a
+  // chance to find the playable URL elsewhere in this same response
+  // before settling for the poster image.
+  for (const item of items) {
+    if (!item.posterOfVideo || !item.sourceId) continue;
+    const scanned = parseStoryBucketMedia(text, item.sourceId, bucketId);
+    const vid =
+      scanned.find(
+        (s) => s.mediaType === "video" && s.sourceId === item.sourceId
+      ) ?? scanned.find((s) => s.mediaType === "video");
+    if (vid) {
+      item.mediaUrl = vid.mediaUrl;
+      item.mediaType = "video";
+      item.posterOfVideo = undefined;
+      item.note =
+        "Video URL recovered by the raw-text scan of the bucket query response (the structured fields carried only the poster).";
+    }
+  }
   if (items.length > 0) return { ok: true, items };
 
   // Fallback: the live response's exact nesting may differ from the
@@ -1417,7 +1465,45 @@ function decodeStoryNodeId(id: unknown): string | null {
   return null;
 }
 
-type CardMedia = { kind: "image" | "video"; url: string };
+type CardMedia = {
+  kind: "image" | "video";
+  url: string;
+  /** The card is a video but only its poster image could be extracted. */
+  videoReducedToPoster?: boolean;
+};
+
+/** True for a URL that points at a video file (video CDN host or .mp4). */
+function isVideoFileUrl(u: string): boolean {
+  return /^https:\/\/video[^"']*\.fbcdn\.net\//.test(u) || /\.mp4(\?|#|$)/.test(u);
+}
+
+/**
+ * Last-resort hunt for a video file URL anywhere inside a media object
+ * (bounded depth): some response shapes nest the playable URL under
+ * keys this parser does not name explicitly.
+ */
+function findVideoUrlDeep(value: unknown, depth: number): string | null {
+  if (depth > 6 || value == null) return null;
+  if (typeof value === "string") {
+    return value.startsWith("https://") && isVideoFileUrl(value)
+      ? value
+      : null;
+  }
+  if (Array.isArray(value)) {
+    for (const v of value) {
+      const hit = findVideoUrlDeep(v, depth + 1);
+      if (hit) return hit;
+    }
+    return null;
+  }
+  if (typeof value === "object") {
+    for (const v of Object.values(value as Record<string, unknown>)) {
+      const hit = findVideoUrlDeep(v, depth + 1);
+      if (hit) return hit;
+    }
+  }
+  return null;
+}
 
 /** One story card node's best media (video beats photo if both ride along). */
 function mediaFromStoryCard(node: Record<string, unknown>): CardMedia | null {
@@ -1426,9 +1512,18 @@ function mediaFromStoryCard(node: Record<string, unknown>): CardMedia | null {
     | undefined;
   if (!Array.isArray(attachments)) return null;
   let image: CardMedia | null = null;
+  let sawVideoMedia = false;
   for (const att of attachments) {
     const media = att?.media;
     if (!media || typeof media !== "object") continue;
+
+    if (
+      media.__typename === "Video" ||
+      typeof media.playable_url === "string" ||
+      media.videoDeliveryResponseFragment != null
+    ) {
+      sawVideoMedia = true;
+    }
 
     const playable = media.playable_url;
     if (typeof playable === "string" && playable) {
@@ -1454,6 +1549,12 @@ function mediaFromStoryCard(node: Record<string, unknown>): CardMedia | null {
         return { kind: "video", url: hd.progressive_url };
       }
     }
+    for (const key of ["browser_native_hd_url", "browser_native_sd_url"]) {
+      const u = media[key];
+      if (typeof u === "string" && u) return { kind: "video", url: u };
+    }
+    const deep = findVideoUrlDeep(media, 0);
+    if (deep) return { kind: "video", url: deep };
 
     const imageObj = media.image as { uri?: string } | undefined;
     const uri = imageObj?.uri;
@@ -1463,6 +1564,13 @@ function mediaFromStoryCard(node: Record<string, unknown>): CardMedia | null {
         image = { kind: "image", url: uri };
       }
     }
+  }
+  if (image && sawVideoMedia) {
+    // The bucket prefetcher response carries a video card's poster but
+    // no playable URL in any named or nested field — flag it so the
+    // caller can try to upgrade this item to the real video (raw-text
+    // scan / session-ssr leg) instead of silently archiving the poster.
+    return { ...image, videoReducedToPoster: true };
   }
   return image;
 }
@@ -1505,7 +1613,10 @@ export function parseGraphqlBucketMedia(text: string): MediaItem[] {
             mediaUrl: media.url,
             mediaType: media.kind,
             sourceId: cardId,
-            note: "Full-size media from the session GraphQL bucket query (dedicated account, query-only; no view-logging call is ever made).",
+            posterOfVideo: media.videoReducedToPoster || undefined,
+            note: media.videoReducedToPoster
+              ? "Video story card: the bucket query response carried only the poster image, no playable URL — upgrade to the real video is attempted by the caller."
+              : "Full-size media from the session GraphQL bucket query (dedicated account, query-only; no view-logging call is ever made).",
           });
         }
       }

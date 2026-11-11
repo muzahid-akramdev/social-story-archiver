@@ -44,9 +44,8 @@ export type SyncContext = {
  * {user_id}/{link_id}/{YYYY-MM-DD}/{crawl_id}.zip with an `archives`
  * row recording it (spec storage layout).
  *
- * Videos keep the v1 behaviour (original file stored individually, not
- * zipped): video recompression needs an ffmpeg pipeline that is out of
- * scope for this pass — noted in the README.
+ * Videos are stored as the original MP4, individually and in the ZIP
+ * (no recompression — no ffmpeg pipeline here).
  */
 export async function syncExtractedMedia(
   link: WatchedLink,
@@ -168,7 +167,10 @@ export async function syncExtractedMedia(
           buffer: compressed.buffer,
         });
       } else {
-        // Video: v1 behaviour — store the original individually.
+        // Video: store the original individually AND include it in this
+        // crawl's ZIP bundle (since 2026-11-12 — previously videos were
+        // stored but never zipped, so the downloadable archive held
+        // only images). No recompression: no ffmpeg pipeline here.
         const path = `${link.user_id}/${link.id}/${storyId}.mp4`;
         const { error: uploadError } = await db.storage
           .from(BUCKET)
@@ -190,6 +192,11 @@ export async function syncExtractedMedia(
           }
           throw insertError;
         }
+
+        zipEntries.push({
+          name: `${storyId}.mp4`,
+          buffer: Buffer.from(bytes),
+        });
       }
 
       outcome.newStories++;
